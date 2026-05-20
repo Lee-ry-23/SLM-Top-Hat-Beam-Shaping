@@ -21,3 +21,6 @@ outputs/
 *.log
 *.pkl
 Beam_Waists (2).ipynb
+slmsuite_cg_example.ipynb
+hologram_varify.ipynb
+get_hologram_theo+MRAF.ipynb
