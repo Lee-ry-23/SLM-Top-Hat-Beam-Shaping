@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.ndimage import rotate, shift
+from skimage.transform import resize
 
 from slmsuite.holography.algorithms import FeedbackHologram
 from slmsuite.hardware.cameraslms import FourierSLM
@@ -30,7 +31,8 @@ def derive_get_image_func_from_feedback_hologram(cfg, fs: FourierSLM, SLM_patter
     )
 
     whole_image = np.array(fs.cam.get_image())
-    image = whole_image * Wcg
+    resized_image = resize(whole_image, Wcg.shape, anti_aliasing=True)
+    image = resized_image * Wcg
 
     def get_image_func():
         return image
