@@ -94,6 +94,7 @@ class Config:
     feedback_angle_guess_deg: float = 0.0
     feedback_angle_search_radius_deg: float = 8.0
     feedback_center_search_radius_px: float = 30.0
+    feedback_center_coarse_step_px: float = 2.0
     feedback_background_percentile: float = 5.0
     feedback_camera_image_is_intensity: bool = True
 

@@ -89,32 +89,28 @@ def fit_feedback_extraction(
     target_norm = _normalized_active_values(target_active, mask)
 
     initial_angle = float(cfg.feedback_angle_guess_deg)
-    center_radius = float(cfg.feedback_center_search_radius_px)
     angle_radius = float(cfg.feedback_angle_search_radius_deg)
-    x0, y0 = center_xy_px
+    center_bounds = _center_search_bounds(image.shape, center_xy_px, crop_shape_yx_px, float(cfg.feedback_center_search_radius_px))
 
     def objective(params: npt.NDArray[np.float64]) -> float:
-        candidate_center = (float(params[0]), float(params[1]))
-        candidate_angle = float(params[2])
-        coords_y, coords_x = _feedback_sampling_coordinates(cfg, candidate_center, candidate_angle)
-        if not _active_region_is_inside_camera(image.shape, coords_y, coords_x, mask):
-            return 1e12
+        return _feedback_pose_cost(cfg, image, mask, target_norm, (float(params[0]), float(params[1])), float(params[2]))
 
-        sampled = _sample_camera_image(image, coords_y, coords_x)
-        sampled = _camera_signal_to_feedback_amplitude(cfg, sampled) * mask
-        try:
-            sampled_norm = _normalized_active_values(sampled, mask)
-        except ValueError:
-            return 1e12
-        return float(np.mean((sampled_norm - target_norm) ** 2))
+    coarse_center = _fit_center_in_zoom(
+        cfg,
+        image,
+        mask,
+        target_norm,
+        center_bounds,
+        initial_angle,
+    )
 
     result = scipy.optimize.minimize(
         objective,
-        x0=np.array([x0, y0, initial_angle], dtype=float),
+        x0=np.array([coarse_center[0], coarse_center[1], initial_angle], dtype=float),
         method="L-BFGS-B",
         bounds=[
-            (x0 - center_radius, x0 + center_radius),
-            (y0 - center_radius, y0 + center_radius),
+            center_bounds[0],
+            center_bounds[1],
             (initial_angle - angle_radius, initial_angle + angle_radius),
         ],
     )
@@ -320,6 +316,95 @@ def _crop_image(
     y0, x0 = _crop_origin(image.shape, center_xy_px, crop_shape_yx_px)
     crop_h, crop_w = crop_shape_yx_px
     return image[y0:y0 + crop_h, x0:x0 + crop_w]
+
+
+def _center_search_bounds(
+    image_shape_yx: tuple[int, int],
+    center_xy_px: tuple[float, float],
+    crop_shape_yx_px: tuple[int, int],
+    center_radius_px: float,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    crop_y0, crop_x0 = _crop_origin(image_shape_yx, center_xy_px, crop_shape_yx_px)
+    crop_h, crop_w = crop_shape_yx_px
+    center_x, center_y = center_xy_px
+    x_bounds = (
+        max(float(crop_x0), center_x - center_radius_px),
+        min(float(crop_x0 + crop_w - 1), center_x + center_radius_px),
+    )
+    y_bounds = (
+        max(float(crop_y0), center_y - center_radius_px),
+        min(float(crop_y0 + crop_h - 1), center_y + center_radius_px),
+    )
+    if x_bounds[0] >= x_bounds[1] or y_bounds[0] >= y_bounds[1]:
+        raise ValueError(
+            "Invalid feedback center search bounds. "
+            f"center_xy_px={center_xy_px}, crop_shape_yx_px={crop_shape_yx_px}, "
+            f"center_radius_px={center_radius_px}."
+        )
+    return x_bounds, y_bounds
+
+
+def _fit_center_in_zoom(
+    cfg,
+    image: npt.NDArray[np.float64],
+    mask: npt.NDArray[np.float64],
+    target_norm: npt.NDArray[np.float64],
+    center_bounds: tuple[tuple[float, float], tuple[float, float]],
+    angle_deg: float,
+) -> tuple[float, float]:
+    x_bounds, y_bounds = center_bounds
+    step_px = float(cfg.feedback_center_coarse_step_px)
+    if step_px <= 0:
+        raise ValueError(f"feedback_center_coarse_step_px must be positive, got {step_px}.")
+
+    x_candidates = _candidate_axis(x_bounds, step_px)
+    y_candidates = _candidate_axis(y_bounds, step_px)
+    best_center = (float(x_candidates[0]), float(y_candidates[0]))
+    best_cost = np.inf
+
+    for candidate_y in y_candidates:
+        for candidate_x in x_candidates:
+            candidate_center = (float(candidate_x), float(candidate_y))
+            cost = _feedback_pose_cost(cfg, image, mask, target_norm, candidate_center, angle_deg)
+            if cost < best_cost:
+                best_cost = cost
+                best_center = candidate_center
+
+    if not np.isfinite(best_cost) or best_cost >= 1e11:
+        raise RuntimeError(
+            "Coarse feedback center fit failed inside the selected zoom. "
+            f"center_bounds={center_bounds}, angle_deg={angle_deg}, best_cost={best_cost:.3e}."
+        )
+    return best_center
+
+
+def _candidate_axis(bounds: tuple[float, float], step_px: float) -> npt.NDArray[np.float64]:
+    lower, upper = bounds
+    values = np.arange(lower, upper + 0.5 * step_px, step_px, dtype=float)
+    if values.size == 0 or values[-1] < upper:
+        values = np.append(values, upper)
+    return np.unique(np.clip(values, lower, upper))
+
+
+def _feedback_pose_cost(
+    cfg,
+    image: npt.NDArray[np.float64],
+    mask: npt.NDArray[np.float64],
+    target_norm: npt.NDArray[np.float64],
+    center_xy_px: tuple[float, float],
+    angle_deg: float,
+) -> float:
+    coords_y, coords_x = _feedback_sampling_coordinates(cfg, center_xy_px, angle_deg)
+    if not _active_region_is_inside_camera(image.shape, coords_y, coords_x, mask):
+        return 1e12
+
+    sampled = _sample_camera_image(image, coords_y, coords_x)
+    sampled = _camera_signal_to_feedback_amplitude(cfg, sampled) * mask
+    try:
+        sampled_norm = _normalized_active_values(sampled, mask)
+    except ValueError:
+        return 1e12
+    return float(np.mean((sampled_norm - target_norm) ** 2))
 
 
 def _target_and_mask(
