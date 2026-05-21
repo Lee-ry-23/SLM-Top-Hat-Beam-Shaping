@@ -14,7 +14,7 @@ from slmsuite.hardware.cameraslms import FourierSLM
 from slmsuite.holography.algorithms import FeedbackHologram
 from slmsuite.holography.toolbox.phase import blaze
 
-from functions import build_target, build_weighting_mask, get_focal_plane_axes_um
+from functions import build_target, build_weighting_mask, get_focal_plane_axes_um, get_plot_radius
 
 
 class FeedbackFitResult(TypedDict):
@@ -256,6 +256,142 @@ def derive_get_image_func_from_feedback_hologram(
         None,
     )
     return make_slmsuite_feedback_image_func(cfg, fs, fit_result)
+
+
+def plot_feedback_profiles(
+    cfg,
+    get_image_func: Callable[[], npt.NDArray[np.float64]],
+    target_amplitude: npt.ArrayLike | None,
+    save_path: str | None,
+    show: bool,
+) -> plt.Figure:
+    feedback_amplitude = np.asarray(get_image_func(), dtype=float)
+    target, mask = _target_and_mask(cfg, target_amplitude)
+
+    if feedback_amplitude.shape != target.shape:
+        feedback_amplitude = resize(
+            feedback_amplitude,
+            target.shape,
+            order=1,
+            mode="constant",
+            anti_aliasing=True,
+            preserve_range=True,
+        ).astype(float)
+
+    feedback_intensity = _normalize_image((np.clip(feedback_amplitude, 0.0, None) * mask) ** 2)
+    target_intensity = _normalize_image((np.clip(target, 0.0, None) * mask) ** 2)
+
+    focal_x_um, focal_y_um = get_focal_plane_axes_um(cfg)
+    radius_um = get_plot_radius(cfg)
+    feedback_crop, bounds = _crop_roi(feedback_intensity, focal_x_um, focal_y_um, radius_um)
+    target_crop, _ = _crop_roi(target_intensity, focal_x_um, focal_y_um, radius_um)
+
+    x_min, x_max, y_min, y_max = bounds
+    crop_x_um = focal_x_um[x_min:x_max]
+    crop_y_um = focal_y_um[y_min:y_max]
+    extent = _axis_extent_from_coords(crop_x_um, crop_y_um)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.8), constrained_layout=True)
+    fig.suptitle("Experimental Optical Feedback Profiles", fontsize=15, fontweight="bold")
+
+    im0 = axes[0].imshow(target_crop, origin="lower", cmap="inferno", vmin=0, vmax=1, extent=extent, aspect="auto")
+    axes[0].set_title("Target ROI Intensity")
+    axes[0].set_xlabel("Focal-plane x (um)")
+    axes[0].set_ylabel("Focal-plane y (um)")
+    _apply_square_axes(axes[0], crop_x_um, crop_y_um)
+    fig.colorbar(im0, ax=axes[0], shrink=0.84)
+
+    im1 = axes[1].imshow(feedback_crop, origin="lower", cmap="inferno", vmin=0, vmax=1, extent=extent, aspect="auto")
+    axes[1].set_title("Experimental ROI Intensity")
+    axes[1].set_xlabel("Focal-plane x (um)")
+    axes[1].set_ylabel("Focal-plane y (um)")
+    _apply_square_axes(axes[1], crop_x_um, crop_y_um)
+    fig.colorbar(im1, ax=axes[1], shrink=0.84)
+
+    _plot_center_profiles(
+        axes[2],
+        feedback_crop,
+        target_crop,
+        crop_x_um,
+        crop_y_um,
+        "Target vs Experimental Profiles",
+    )
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig
+
+
+def _crop_roi(
+    data: npt.NDArray[np.float64],
+    x_axis: npt.NDArray[np.float64],
+    y_axis: npt.NDArray[np.float64],
+    radius_um: float,
+) -> tuple[npt.NDArray[np.float64], tuple[int, int, int, int]]:
+    x_mask = np.abs(x_axis) <= radius_um
+    y_mask = np.abs(y_axis) <= radius_um
+    x_indices = np.where(x_mask)[0]
+    y_indices = np.where(y_mask)[0]
+    if x_indices.size == 0 or y_indices.size == 0:
+        raise ValueError(
+            "Feedback profile crop contains no pixels. "
+            f"radius_um={radius_um}, x_range=({x_axis[0]}, {x_axis[-1]}), "
+            f"y_range=({y_axis[0]}, {y_axis[-1]})."
+        )
+
+    x_min, x_max = int(x_indices[0]), int(x_indices[-1] + 1)
+    y_min, y_max = int(y_indices[0]), int(y_indices[-1] + 1)
+    return data[y_min:y_max, x_min:x_max], (x_min, x_max, y_min, y_max)
+
+
+def _normalize_image(data: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    peak = float(np.max(data))
+    if peak <= 0:
+        return data
+    return data / peak
+
+
+def _axis_extent_from_coords(
+    x_axis: npt.NDArray[np.float64],
+    y_axis: npt.NDArray[np.float64],
+) -> list[float]:
+    return [float(x_axis[0]), float(x_axis[-1]), float(y_axis[0]), float(y_axis[-1])]
+
+
+def _apply_square_axes(
+    ax: plt.Axes,
+    x_axis: npt.NDArray[np.float64],
+    y_axis: npt.NDArray[np.float64],
+) -> None:
+    half_span = max(float(np.max(np.abs(x_axis))), float(np.max(np.abs(y_axis))))
+    ax.set_xlim(-half_span, half_span)
+    ax.set_ylim(-half_span, half_span)
+    ax.set_aspect("equal", adjustable="box")
+
+
+def _plot_center_profiles(
+    ax: plt.Axes,
+    experimental_intensity: npt.NDArray[np.float64],
+    target_intensity: npt.NDArray[np.float64],
+    x_axis_um: npt.NDArray[np.float64],
+    y_axis_um: npt.NDArray[np.float64],
+    title: str,
+) -> None:
+    center_y = experimental_intensity.shape[0] // 2
+    center_x = experimental_intensity.shape[1] // 2
+    ax.plot(x_axis_um, target_intensity[center_y, :], lw=2.2, color="#1f77b4", label="Target x-cut")
+    ax.plot(x_axis_um, experimental_intensity[center_y, :], lw=2.2, color="#d62728", label="Experimental x-cut")
+    ax.plot(y_axis_um, target_intensity[:, center_x], lw=1.9, ls="--", color="#2ca02c", label="Target y-cut")
+    ax.plot(y_axis_um, experimental_intensity[:, center_x], lw=1.9, ls="--", color="#9467bd", label="Experimental y-cut")
+    ax.set_title(title)
+    ax.set_xlabel("Position (um)")
+    ax.set_ylabel("Normalized intensity")
+    ax.grid(True, alpha=0.25, linestyle="--")
+    ax.legend(frameon=True, fontsize=8, loc="best")
 
 
 def _as_float_image(camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
