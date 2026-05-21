@@ -429,7 +429,7 @@ def fitting_input_beam(cfg):
 
     fs.load_calibration(cfg.input_beam_h5_path)
     calibration_results = fs.wavefront_calibration_superpixel_process(
-        plot=True,
+        plot=False,
         r2_threshold=.5,
         remove_background=True,
         apply=True,

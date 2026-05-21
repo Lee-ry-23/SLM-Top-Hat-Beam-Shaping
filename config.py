@@ -17,6 +17,9 @@ class Config:
     # Native SLM pixel size in um.
     base_spix_um: float = 8
 
+    # Native camera pixel size in the optical feedback image plane.
+    camera_pixel_size_um: float = 3.45
+
     # Simulation grid sizes after superpixel grouping.
     Nx: int = 0
     Ny: int = 0
@@ -29,20 +32,20 @@ class Config:
     spix: float = 0.0
 
     # Input Gaussian 1/e^2 diameters in mm on the SLM plane.
-    beam_diameter_x_mm: float = 2.43
-    beam_diameter_y_mm: float = 2.43
+    beam_diameter_x_mm: float = 5.704
+    beam_diameter_y_mm: float = 5.938
 
     # Input beam source: "gaussian", "measured_h5", or "slmsuite_h5".
     input_beam_source: str = "slmsuite_h5"
-    input_beam_h5_path: str | None = "/Users/lee/Documents/IQOQI/FlatHead/10806-SLM-wavefront_superpixel-calibration_00016.h5"
+    input_beam_h5_path: str | None = "/Users/lee/Documents/IQOQI/BeamShaping/FlatHead/10806-SLM-wavefront_superpixel-calibration_00036.h5"
     input_beam_h5_dataset: str = "power"
     measured_power_is_intensity: bool = True
     measured_beam_smoothing_sigma: float = 0.0
     measured_beam_background_percentile: float | None = None
 
     # Focal length and wavelength used to convert far-field pixels to physical coordinates.
-    lens_focal_length_mm: float = 100.0
-    wavelength_nm: float = 780.0
+    lens_focal_length_mm: float = 400.0
+    wavelength_nm: float = 420.0
 
     # Target mode: "line_shape" or "rectangle".
     target_mode: str = "rectangle"
@@ -83,9 +86,18 @@ class Config:
     mask_margin_um: float = 200.0
     output_crop_factor: float = 2.5
 
+    # Optical feedback extraction settings.
+    feedback_center_xy_px: tuple[float, float] | None = None
+    feedback_crop_shape_yx_px: tuple[int, int] = (300, 300)
+    feedback_angle_guess_deg: float = 0.0
+    feedback_angle_search_radius_deg: float = 8.0
+    feedback_center_search_radius_px: float = 30.0
+    feedback_background_percentile: float = 5.0
+    feedback_camera_image_is_intensity: bool = True
+
     # Optimizer settings.
     optimizer_method: str = "CG"
-    optimizer_maxiter: int = 2
+    optimizer_maxiter: int = 200
     optimizer_disp: bool = True
 
     # Plotting and saving switches.
@@ -99,9 +111,11 @@ class Config:
     # Parameter scan definition.
     scan_parameters: dict[str, Any] = field(
         default_factory=lambda: {
-            "beam_diameter_x_mm": np.linspace(1.5, 3.0, 10),
-            "lens_focal_length_mm": np.linspace(50.0, 300.0, 20),
+            # "beam_diameter_x_mm": np.linspace(1.5, 3.0, 10),
+            # "lens_focal_length_mm": np.linspace(50.0, 300.0, 20),
             # "curv": np.linspace(0.0, 10.0, 6),
+            "rect_width_x_um": np.linspace(50.0, 300.0, 10),
+            "rect_width_y_um": np.linspace(5.0, 40.0, 10),
         }
     )
     scan_linked_parameters: dict[str, list[str]] = field(
