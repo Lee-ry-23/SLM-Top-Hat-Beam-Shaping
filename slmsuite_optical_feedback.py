@@ -34,11 +34,12 @@ def capture_slmsuite_image(fs: FourierSLM) -> npt.NDArray[np.float64]:
 
 
 def preview_feedback_zoom(
+    cfg,
     camera_image: npt.ArrayLike,
     center_xy_px: tuple[float, float],
     crop_shape_yx_px: tuple[int, int],
 ) -> None:
-    image = _as_float_image(camera_image)
+    image = _rotate_camera_image_for_feedback(cfg, camera_image)
     crop = _crop_image(image, center_xy_px, crop_shape_yx_px)
     crop_y0, crop_x0 = _crop_origin(image.shape, center_xy_px, crop_shape_yx_px)
 
@@ -80,7 +81,7 @@ def fit_feedback_extraction(
     crop_shape_yx_px: tuple[int, int],
     target_amplitude: npt.ArrayLike | None,
 ) -> FeedbackFitResult:
-    image = _prepare_camera_image(camera_image, cfg.feedback_background_percentile)
+    image = _prepare_camera_image(cfg, camera_image)
     _crop_image(image, center_xy_px, crop_shape_yx_px)
 
     target, mask = _target_and_mask(cfg, target_amplitude)
@@ -144,7 +145,7 @@ def plot_feedback_extraction(
     fit_result: FeedbackFitResult,
     crop_shape_yx_px: tuple[int, int],
 ) -> None:
-    image = _as_float_image(camera_image)
+    image = _rotate_camera_image_for_feedback(cfg, camera_image)
     center_xy_px = fit_result["center_xy_px"]
     crop = _crop_image(image, center_xy_px, crop_shape_yx_px)
     crop_y0, crop_x0 = _crop_origin(image.shape, center_xy_px, crop_shape_yx_px)
@@ -198,7 +199,7 @@ def extract_feedback_image(
     angle_deg: float,
     target_amplitude: npt.ArrayLike | None,
 ) -> npt.NDArray[np.float64]:
-    image = _prepare_camera_image(camera_image, cfg.feedback_background_percentile)
+    image = _prepare_camera_image(cfg, camera_image)
     target, mask = _target_and_mask(cfg, target_amplitude)
     coords_y, coords_x = _feedback_sampling_coordinates(cfg, center_xy_px, angle_deg)
 
@@ -268,8 +269,21 @@ def _as_float_image(camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
     return np.nan_to_num(image, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def _prepare_camera_image(camera_image: npt.ArrayLike, background_percentile: float) -> npt.NDArray[np.float64]:
+def _rotate_camera_image_for_feedback(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
     image = _as_float_image(camera_image)
+    rotation_deg = int(cfg.feedback_camera_rotation_deg)
+    if rotation_deg % 90 != 0:
+        raise ValueError(
+            "feedback_camera_rotation_deg must be a multiple of 90 degrees. "
+            f"Got {cfg.feedback_camera_rotation_deg}."
+        )
+
+    return np.rot90(image, k=(rotation_deg // 90) % 4)
+
+
+def _prepare_camera_image(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
+    image = _rotate_camera_image_for_feedback(cfg, camera_image)
+    background_percentile = float(cfg.feedback_background_percentile)
     background = float(np.percentile(image, background_percentile))
     image = np.clip(image - background, 0.0, None)
     if np.max(image) <= 0:
