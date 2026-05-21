@@ -144,7 +144,7 @@ def cg_optimize(cfg):
         "device": str(device),
     }
 
-def cg_optimize_with_target(cfg, Ta_np):
+def cg_optimize_with_target(cfg, Ta_np, last_opt_result):
     cfg.update_derived()
     total_start = perf_counter()
 
@@ -165,15 +165,7 @@ def cg_optimize_with_target(cfg, Ta_np):
     Ta_np *= Wcg_np
     Ta_np *= np.sqrt(np.sum(L_np**2) / np.sum(Ta_np**2))
 
-    init_phi_np = phase_guess_2d(
-        Nx,
-        Ny,
-        cfg.init_phase_d,
-        cfg.init_phase_asp,
-        cfg.curv / 1000,
-        cfg.init_phase_ang,
-        cfg.init_phase_b,
-    )
+    init_phi_np = last_opt_result["final_phase"].reshape(-1)
 
     L = torch.tensor(L_np, dtype=dtype, device=device)
     Ta = torch.tensor(Ta_np, dtype=dtype, device=device)
@@ -270,13 +262,13 @@ def cg_optimize_with_target(cfg, Ta_np):
         "device": str(device),
     }
 
-def cg_optimize_optical_feedback(cfg, get_image_func, smoothing_func=None):
+def cg_optimize_optical_feedback(cfg, get_image_func, last_opt_result, smoothing_func=None):
     # this function is used for optical feedback, the main idea is that 
     # we observed some other pattern I, with the pre-defined target T, 
     # then the new target is replaced into T' = T + D, where D = T - I, and sometimes we should do a smoothing on D
     # now we just ignore, this function only runs one iteration
     cfg.update_derived()
-    Ta_np = build_target(cfg)
+    Ta_np = last_opt_result["target_amplitude"]
     I_observed = get_image_func()
     # normalize both to be fair
     Ta_np *= np.sqrt(cfg.input_power_norm / np.sum(Ta_np**2))
@@ -284,5 +276,5 @@ def cg_optimize_optical_feedback(cfg, get_image_func, smoothing_func=None):
     D = Ta_np - I_observed
     if smoothing_func is not None:
         D = smoothing_func(D)
-    cg_opt_result = cg_optimize_with_target(cfg, Ta_np + D)
+    cg_opt_result = cg_optimize_with_target(cfg, Ta_np + D, last_opt_result)
     return cg_opt_result
