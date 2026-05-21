@@ -2,7 +2,7 @@ import numpy as np
 import scipy
 import h5py
 import matplotlib.pyplot as plt
-from scipy.ndimage import binary_dilation, gaussian_filter
+from scipy.ndimage import binary_dilation, convolve, gaussian_filter
 from scipy.ndimage import zoom
 
 
@@ -240,6 +240,35 @@ def flat_top_box_physical(x_axis, y_axis, width_x_um, width_y_um, edge_width_x_u
 
 def smooth_with_gaussian(z, sigma):
     return gaussian_filter(z, sigma=sigma)
+
+
+def smooth_with_convolution(z: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    data = np.asarray(z, dtype=float)
+    kernel_array = np.asarray(kernel, dtype=float)
+
+    if data.ndim != 2:
+        raise ValueError(f"Convolution smoothing expects a 2D array, got shape {data.shape}.")
+    if kernel_array.ndim != 2 or kernel_array.size == 0:
+        raise ValueError(f"Convolution kernel must be a non-empty 2D array, got shape {kernel_array.shape}.")
+    if not np.all(np.isfinite(kernel_array)):
+        raise ValueError("Convolution kernel contains non-finite values.")
+
+    kernel_sum = float(np.sum(kernel_array))
+    if abs(kernel_sum) <= np.finfo(float).eps:
+        raise ValueError("Convolution kernel sum must be non-zero for normalized smoothing.")
+
+    normalized_kernel = kernel_array / kernel_sum
+    return convolve(data, normalized_kernel, mode="nearest")
+
+
+def smooth_with_box_convolution(z: np.ndarray, kernel_size: int) -> np.ndarray:
+    if kernel_size <= 0:
+        raise ValueError(f"kernel_size must be positive, got {kernel_size}.")
+    if kernel_size % 2 == 0:
+        raise ValueError(f"kernel_size must be odd so the kernel has a center pixel, got {kernel_size}.")
+
+    kernel = np.ones((kernel_size, kernel_size), dtype=float)
+    return smooth_with_convolution(z, kernel)
 
 
 def weighting_value(M, p, v=0):
