@@ -9,7 +9,6 @@ import numpy.typing as npt
 import scipy.optimize
 from matplotlib.patches import Rectangle
 from scipy.ndimage import map_coordinates
-from skimage.transform import resize
 from slmsuite.hardware.cameraslms import FourierSLM
 from slmsuite.holography.algorithms import FeedbackHologram
 from slmsuite.holography.toolbox.phase import blaze
@@ -145,6 +144,8 @@ def plot_feedback_extraction(
     center_xy_px = fit_result["center_xy_px"]
     crop = _crop_image(image, center_xy_px, crop_shape_yx_px)
     crop_y0, crop_x0 = _crop_origin(image.shape, center_xy_px, crop_shape_yx_px)
+    focal_x_um, focal_y_um = get_focal_plane_axes_um(cfg)
+    focal_extent = _axis_extent_from_coords(focal_x_um, focal_y_um)
 
     fig, axes = plt.subplots(2, 2, figsize=(11, 9), constrained_layout=True)
 
@@ -170,18 +171,32 @@ def plot_feedback_extraction(
     axes[0, 1].set_xlabel("zoom x (px)")
     axes[0, 1].set_ylabel("zoom y (px)")
 
-    im_target = axes[1, 0].imshow(fit_result["target_amplitude"], origin="lower", cmap="viridis")
-    axes[1, 0].contour(fit_result["weighting_mask"] > 0, levels=[0.5], colors="white", linewidths=0.8)
+    im_target = axes[1, 0].imshow(
+        fit_result["target_amplitude"],
+        origin="lower",
+        cmap="viridis",
+        extent=focal_extent,
+        aspect="auto",
+    )
+    axes[1, 0].contour(focal_x_um, focal_y_um, fit_result["weighting_mask"] > 0, levels=[0.5], colors="white", linewidths=0.8)
     axes[1, 0].set_title("Target and feedback mask")
-    axes[1, 0].set_xlabel("computed x (px)")
-    axes[1, 0].set_ylabel("computed y (px)")
+    axes[1, 0].set_xlabel("Focal-plane x (um)")
+    axes[1, 0].set_ylabel("Focal-plane y (um)")
+    _apply_square_axes(axes[1, 0], focal_x_um, focal_y_um)
     fig.colorbar(im_target, ax=axes[1, 0], shrink=0.82)
 
-    im_feedback = axes[1, 1].imshow(fit_result["extracted_image"], origin="lower", cmap="viridis")
-    axes[1, 1].contour(fit_result["weighting_mask"] > 0, levels=[0.5], colors="white", linewidths=0.8)
+    im_feedback = axes[1, 1].imshow(
+        fit_result["extracted_image"],
+        origin="lower",
+        cmap="viridis",
+        extent=focal_extent,
+        aspect="auto",
+    )
+    axes[1, 1].contour(focal_x_um, focal_y_um, fit_result["weighting_mask"] > 0, levels=[0.5], colors="white", linewidths=0.8)
     axes[1, 1].set_title("Extracted experimental feedback")
-    axes[1, 1].set_xlabel("computed x (px)")
-    axes[1, 1].set_ylabel("computed y (px)")
+    axes[1, 1].set_xlabel("Focal-plane x (um)")
+    axes[1, 1].set_ylabel("Focal-plane y (um)")
+    _apply_square_axes(axes[1, 1], focal_x_um, focal_y_um)
     fig.colorbar(im_feedback, ax=axes[1, 1], shrink=0.82)
 
     fig.suptitle(f"Optical feedback extraction, fit cost = {fit_result['cost']:.3e}")
@@ -269,14 +284,11 @@ def plot_feedback_profiles(
     target, mask = _target_and_mask(cfg, target_amplitude)
 
     if feedback_amplitude.shape != target.shape:
-        feedback_amplitude = resize(
-            feedback_amplitude,
-            target.shape,
-            order=1,
-            mode="constant",
-            anti_aliasing=True,
-            preserve_range=True,
-        ).astype(float)
+        raise ValueError(
+            "Feedback image shape does not match the optimization grid. "
+            f"feedback_shape={feedback_amplitude.shape}, target_shape={target.shape}. "
+            "Do not resize feedback images here because it changes the physical x/y ratio."
+        )
 
     feedback_intensity = _normalize_image((np.clip(feedback_amplitude, 0.0, None) * mask) ** 2)
     target_intensity = _normalize_image((np.clip(target, 0.0, None) * mask) ** 2)
@@ -551,15 +563,13 @@ def _target_and_mask(
         target = np.asarray(build_target(cfg), dtype=float)
     else:
         target = np.asarray(target_amplitude, dtype=float)
-        if target.shape != (cfg.NTy, cfg.NTx):
-            target = resize(
-                target,
-                (cfg.NTy, cfg.NTx),
-                order=1,
-                mode="constant",
-                anti_aliasing=True,
-                preserve_range=True,
-            ).astype(float)
+        expected_shape = (cfg.NTy, cfg.NTx)
+        if target.shape != expected_shape:
+            raise ValueError(
+                "Feedback target amplitude must already be on the optimization grid. "
+                f"target_shape={target.shape}, expected_shape={expected_shape}. "
+                "Use the same physical focal-plane grid as cfg instead of resizing here."
+            )
 
     if np.max(np.abs(target)) <= 0:
         raise ValueError("Feedback target amplitude contains no positive signal.")
