@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 import scipy.optimize
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Circle, Rectangle
 from scipy.ndimage import map_coordinates
 from slmsuite.hardware.cameraslms import FourierSLM
 from slmsuite.holography.algorithms import FeedbackHologram
@@ -22,6 +22,9 @@ class FeedbackFitResult(TypedDict):
     cost: float
     target_amplitude: npt.NDArray[np.float64]
     weighting_mask: npt.NDArray[np.float64]
+    support_center_xy_px: tuple[float, float]
+    support_diameter_px: float
+    feedback_scale_factor: float
     extracted_image: npt.NDArray[np.float64]
 
 
@@ -122,14 +125,33 @@ def fit_feedback_extraction(
 
     fitted_center = (float(result.x[0]), float(result.x[1]))
     fitted_angle = float(result.x[2])
-    extracted_image = extract_feedback_image(cfg, camera_image, fitted_center, fitted_angle, target)
+    support_center, support_diameter = _fit_experimental_support_circle(
+        cfg,
+        image,
+        fitted_center,
+        fitted_angle,
+        crop_shape_yx_px,
+    )
+    feedback_scale = _feedback_scale_factor(cfg, target, support_diameter)
+    extracted_image, support_mask = extract_feedback_image_with_support(
+        cfg,
+        camera_image,
+        support_center,
+        fitted_angle,
+        target,
+        support_diameter,
+        feedback_scale,
+    )
 
     return {
         "center_xy_px": fitted_center,
         "angle_deg": fitted_angle,
         "cost": float(result.fun),
         "target_amplitude": target,
-        "weighting_mask": mask,
+        "weighting_mask": support_mask,
+        "support_center_xy_px": support_center,
+        "support_diameter_px": support_diameter,
+        "feedback_scale_factor": feedback_scale,
         "extracted_image": extracted_image,
     }
 
@@ -151,6 +173,7 @@ def plot_feedback_extraction(
 
     axes[0, 0].imshow(image, origin="lower", cmap="magma")
     axes[0, 0].scatter([center_xy_px[0]], [center_xy_px[1]], s=42, c="cyan", marker="+")
+    axes[0, 0].scatter([fit_result["support_center_xy_px"][0]], [fit_result["support_center_xy_px"][1]], s=42, c="lime", marker="x")
     axes[0, 0].add_patch(
         Rectangle(
             (crop_x0, crop_y0),
@@ -161,13 +184,38 @@ def plot_feedback_extraction(
             linewidth=1.5,
         )
     )
+    axes[0, 0].add_patch(
+        Circle(
+            fit_result["support_center_xy_px"],
+            fit_result["support_diameter_px"] / 2,
+            fill=False,
+            edgecolor="lime",
+            linewidth=1.5,
+        )
+    )
     axes[0, 0].set_title("Fitted camera position")
     axes[0, 0].set_xlabel("camera x (px)")
     axes[0, 0].set_ylabel("camera y (px)")
 
     axes[0, 1].imshow(crop, origin="lower", cmap="magma")
     axes[0, 1].scatter([center_xy_px[0] - crop_x0], [center_xy_px[1] - crop_y0], s=42, c="cyan", marker="+")
-    axes[0, 1].set_title(f"Zoom, fitted angle = {fit_result['angle_deg']:.2f} deg")
+    axes[0, 1].scatter(
+        [fit_result["support_center_xy_px"][0] - crop_x0],
+        [fit_result["support_center_xy_px"][1] - crop_y0],
+        s=42,
+        c="lime",
+        marker="x",
+    )
+    axes[0, 1].add_patch(
+        Circle(
+            (fit_result["support_center_xy_px"][0] - crop_x0, fit_result["support_center_xy_px"][1] - crop_y0),
+            fit_result["support_diameter_px"] / 2,
+            fill=False,
+            edgecolor="lime",
+            linewidth=1.5,
+        )
+    )
+    axes[0, 1].set_title(f"Zoom, angle={fit_result['angle_deg']:.2f} deg, scale={fit_result['feedback_scale_factor']:.3f}")
     axes[0, 1].set_xlabel("zoom x (px)")
     axes[0, 1].set_ylabel("zoom y (px)")
 
@@ -199,7 +247,10 @@ def plot_feedback_extraction(
     _apply_square_axes(axes[1, 1], focal_x_um, focal_y_um)
     fig.colorbar(im_feedback, ax=axes[1, 1], shrink=0.82)
 
-    fig.suptitle(f"Optical feedback extraction, fit cost = {fit_result['cost']:.3e}")
+    fig.suptitle(
+        f"Optical feedback extraction, fit cost={fit_result['cost']:.3e}, "
+        f"diameter={fit_result['support_diameter_px']:.1f} px, scale={fit_result['feedback_scale_factor']:.3f}"
+    )
     plt.show()
 
 
@@ -225,18 +276,60 @@ def extract_feedback_image(
     return _camera_signal_to_feedback_amplitude(cfg, sampled) * mask
 
 
+def extract_feedback_image_with_support(
+    cfg,
+    camera_image: npt.ArrayLike,
+    support_center_xy_px: tuple[float, float],
+    angle_deg: float,
+    target_amplitude: npt.ArrayLike | None,
+    support_diameter_px: float,
+    feedback_scale_factor: float,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    image = _prepare_camera_image(cfg, camera_image)
+    target, _ = _target_and_mask(cfg, target_amplitude)
+    coords_y, coords_x = _feedback_sampling_coordinates_scaled(
+        cfg,
+        support_center_xy_px,
+        angle_deg,
+        feedback_scale_factor,
+    )
+    support_mask = _support_mask_from_camera_coordinates(coords_y, coords_x, support_center_xy_px, support_diameter_px)
+
+    if not _active_region_is_inside_camera(image.shape, coords_y, coords_x, support_mask):
+        raise ValueError(
+            "Experimental feedback support maps outside the camera image. "
+            f"support_center_xy_px={support_center_xy_px}, angle_deg={angle_deg}, "
+            f"support_diameter_px={support_diameter_px}, feedback_scale_factor={feedback_scale_factor}, "
+            f"camera_shape_yx={image.shape}."
+        )
+
+    sampled = _sample_camera_image(image, coords_y, coords_x)
+    return _camera_signal_to_feedback_amplitude(cfg, sampled) * support_mask, support_mask
+
+
 def make_slmsuite_feedback_image_func(
     cfg,
     fs: FourierSLM,
     fit_result: FeedbackFitResult,
 ) -> Callable[[], npt.NDArray[np.float64]]:
-    center_xy_px = fit_result["center_xy_px"]
+    support_center_xy_px = fit_result["support_center_xy_px"]
     angle_deg = fit_result["angle_deg"]
     target_amplitude = fit_result["target_amplitude"]
+    support_diameter_px = fit_result["support_diameter_px"]
+    feedback_scale_factor = fit_result["feedback_scale_factor"]
 
     def get_image_func() -> npt.NDArray[np.float64]:
         camera_image = capture_slmsuite_image(fs)
-        return extract_feedback_image(cfg, camera_image, center_xy_px, angle_deg, target_amplitude)
+        feedback_image, _ = extract_feedback_image_with_support(
+            cfg,
+            camera_image,
+            support_center_xy_px,
+            angle_deg,
+            target_amplitude,
+            support_diameter_px,
+            feedback_scale_factor,
+        )
+        return feedback_image
 
     return get_image_func
 
@@ -555,6 +648,136 @@ def _feedback_pose_cost(
     return float(np.mean((sampled_norm - target_norm) ** 2))
 
 
+def _fit_experimental_support_circle(
+    cfg,
+    image: npt.NDArray[np.float64],
+    center_xy_px: tuple[float, float],
+    angle_deg: float,
+    crop_shape_yx_px: tuple[int, int],
+) -> tuple[tuple[float, float], float]:
+    half_width_px = max(2.0, float(crop_shape_yx_px[1]) / 2)
+    offsets_px = np.arange(-half_width_px, half_width_px + 1.0, 1.0, dtype=float)
+    profile = _sample_camera_x_profile(image, center_xy_px, angle_deg, offsets_px)
+    left_offset, right_offset = _find_centered_profile_edges(cfg, offsets_px, profile)
+
+    theta = np.deg2rad(angle_deg)
+    cos_t = float(np.cos(theta))
+    sin_t = float(np.sin(theta))
+    center_offset = 0.5 * (left_offset + right_offset)
+    support_center = (
+        float(center_xy_px[0] + cos_t * center_offset),
+        float(center_xy_px[1] + sin_t * center_offset),
+    )
+    support_diameter = float(right_offset - left_offset)
+    if support_diameter <= 0:
+        raise ValueError(
+            "Experimental support diameter must be positive. "
+            f"left_offset={left_offset}, right_offset={right_offset}."
+        )
+    return support_center, support_diameter
+
+
+def _sample_camera_x_profile(
+    image: npt.NDArray[np.float64],
+    center_xy_px: tuple[float, float],
+    angle_deg: float,
+    offsets_px: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    theta = np.deg2rad(angle_deg)
+    center_x, center_y = center_xy_px
+    coords_x = center_x + np.cos(theta) * offsets_px
+    coords_y = center_y + np.sin(theta) * offsets_px
+    return _sample_camera_image(image, coords_y, coords_x)
+
+
+def _find_centered_profile_edges(
+    cfg,
+    offsets_px: npt.NDArray[np.float64],
+    profile: npt.NDArray[np.float64],
+) -> tuple[float, float]:
+    if offsets_px.shape != profile.shape:
+        raise ValueError(f"offset/profile shape mismatch: {offsets_px.shape} vs {profile.shape}.")
+
+    peak = float(np.max(profile))
+    if peak <= 0:
+        raise ValueError("Cannot fit experimental support because the x-profile has no positive signal.")
+
+    threshold = float(cfg.feedback_edge_threshold_fraction) * peak
+    if threshold < 0:
+        raise ValueError(f"feedback_edge_threshold_fraction must be non-negative, got {cfg.feedback_edge_threshold_fraction}.")
+
+    center_index = int(np.argmin(np.abs(offsets_px)))
+    left_candidates = np.where(profile[:center_index] <= threshold)[0]
+    right_candidates = np.where(profile[center_index + 1:] <= threshold)[0]
+    if left_candidates.size == 0 or right_candidates.size == 0:
+        raise RuntimeError(
+            "Could not find two x-profile edges for experimental feedback support. "
+            f"threshold={threshold:.3e}, peak={peak:.3e}, "
+            f"left_found={left_candidates.size > 0}, right_found={right_candidates.size > 0}."
+        )
+
+    left_index = int(left_candidates[-1])
+    right_index = int(center_index + 1 + right_candidates[0])
+    return (
+        _interpolated_edge_offset(offsets_px, profile, left_index, left_index + 1, threshold),
+        _interpolated_edge_offset(offsets_px, profile, right_index, right_index - 1, threshold),
+    )
+
+
+def _interpolated_edge_offset(
+    offsets_px: npt.NDArray[np.float64],
+    profile: npt.NDArray[np.float64],
+    outside_index: int,
+    inside_index: int,
+    threshold: float,
+) -> float:
+    outside_value = float(profile[outside_index])
+    inside_value = float(profile[inside_index])
+    outside_offset = float(offsets_px[outside_index])
+    inside_offset = float(offsets_px[inside_index])
+    denominator = inside_value - outside_value
+    if abs(denominator) <= np.finfo(float).eps:
+        return outside_offset
+    fraction = (threshold - outside_value) / denominator
+    return outside_offset + float(np.clip(fraction, 0.0, 1.0)) * (inside_offset - outside_offset)
+
+
+def _feedback_scale_factor(
+    cfg,
+    target: npt.NDArray[np.float64],
+    support_diameter_px: float,
+) -> float:
+    target_width_um = _target_x_width_um(cfg, target)
+    experimental_width_um = support_diameter_px * float(cfg.camera_pixel_size_um)
+    if experimental_width_um <= 0:
+        raise ValueError(f"Experimental width must be positive, got {experimental_width_um}.")
+    return target_width_um / experimental_width_um
+
+
+def _target_x_width_um(cfg, target: npt.NDArray[np.float64]) -> float:
+    focal_x_um, _ = get_focal_plane_axes_um(cfg)
+    threshold = float(cfg.weighting_threshold) * float(np.max(np.abs(target)))
+    active = np.any(np.abs(target) > threshold, axis=0)
+    active_indices = np.where(active)[0]
+    if active_indices.size < 2:
+        raise ValueError("Cannot determine target x width because target has fewer than two active x pixels.")
+    return float(focal_x_um[active_indices[-1]] - focal_x_um[active_indices[0]])
+
+
+def _support_mask_from_camera_coordinates(
+    coords_y: npt.NDArray[np.float64],
+    coords_x: npt.NDArray[np.float64],
+    support_center_xy_px: tuple[float, float],
+    support_diameter_px: float,
+) -> npt.NDArray[np.float64]:
+    center_x, center_y = support_center_xy_px
+    radius_px = support_diameter_px / 2
+    distance_px = np.sqrt((coords_x - center_x) ** 2 + (coords_y - center_y) ** 2)
+    mask = np.zeros(coords_x.shape, dtype=float)
+    mask[distance_px <= radius_px] = 1.0
+    return mask
+
+
 def _target_and_mask(
     cfg,
     target_amplitude: npt.ArrayLike | None,
@@ -583,15 +806,28 @@ def _feedback_sampling_coordinates(
     center_xy_px: tuple[float, float],
     angle_deg: float,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    return _feedback_sampling_coordinates_scaled(cfg, center_xy_px, angle_deg, 1.0)
+
+
+def _feedback_sampling_coordinates_scaled(
+    cfg,
+    center_xy_px: tuple[float, float],
+    angle_deg: float,
+    scale_factor: float,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    if scale_factor <= 0:
+        raise ValueError(f"Feedback scale factor must be positive, got {scale_factor}.")
+
     focal_x_um, focal_y_um = get_focal_plane_axes_um(cfg)
     x_um, y_um = np.meshgrid(focal_x_um, focal_y_um, indexing="xy")
     theta = np.deg2rad(angle_deg)
     cos_t = np.cos(theta)
     sin_t = np.sin(theta)
     center_x_px, center_y_px = center_xy_px
+    pixel_size_um = float(cfg.camera_pixel_size_um) * scale_factor
 
-    camera_x_px = center_x_px + (cos_t * x_um - sin_t * y_um) / cfg.camera_pixel_size_um
-    camera_y_px = center_y_px + (sin_t * x_um + cos_t * y_um) / cfg.camera_pixel_size_um
+    camera_x_px = center_x_px + (cos_t * x_um - sin_t * y_um) / pixel_size_um
+    camera_y_px = center_y_px + (sin_t * x_um + cos_t * y_um) / pixel_size_um
     return camera_y_px, camera_x_px
 
 
