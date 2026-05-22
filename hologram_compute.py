@@ -265,19 +265,86 @@ def cg_optimize_with_target(cfg, Ta_np, last_opt_result):
         "device": str(device),
     }
 
-def cg_optimize_optical_feedback(cfg, get_image_func, last_opt_result, smoothing_func=None):
-    # this function is used for optical feedback, the main idea is that 
-    # we observed some other pattern I, with the pre-defined target T, 
-    # then the new target is replaced into T' = T + D, where D = T - I, and sometimes we should do a smoothing on D
-    # now we just ignore, this function only runs one iteration
+
+def _normalize_feedback_array(data, target_power, name):
+    array = np.asarray(data, dtype=float).copy()
+    array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+    array = np.clip(array, 0.0, None)
+    power = float(np.sum(array**2))
+    if power <= 0:
+        raise ValueError(f"{name} contains no positive power and cannot be normalized.")
+    return array * np.sqrt(target_power / power)
+
+
+def _feedback_signal_mask(measured_amplitude):
+    measured = np.asarray(measured_amplitude, dtype=float)
+    mask = measured > 0
+    if not np.any(mask):
+        raise ValueError("Feedback measurement has no active pixels. Check get_image_func and the fitted support mask.")
+    return mask.astype(float)
+
+
+def _feedback_error_metrics(target, measured, signal_mask):
+    active = signal_mask > 0
+    residual = np.asarray(target, dtype=float)[active] - np.asarray(measured, dtype=float)[active]
+    rmse = float(np.sqrt(np.mean(residual**2)))
+    peak = float(np.max(np.asarray(target, dtype=float)[active]))
+    psnr = np.inf if rmse <= 0 else float(20 * np.log10(max(peak, np.finfo(float).eps) / rmse))
+    return rmse, psnr
+
+
+def cg_optimize_optical_feedback(cfg, get_image_func, last_opt_result, smoothing_func=None, alpha=1.0):
     cfg.update_derived()
-    Ta_np = last_opt_result["target_amplitude"]
-    I_observed = get_image_func()
-    # normalize both to be fair
-    Ta_np *= np.sqrt(cfg.input_power_norm / np.sum(Ta_np**2))
-    I_observed *= np.sqrt(cfg.input_power_norm / np.sum(I_observed**2))
-    D = Ta_np - I_observed
+
+    original_target = np.asarray(
+        last_opt_result.get("feedback_original_target", last_opt_result["target_amplitude"]),
+        dtype=float,
+    ).copy()
+    current_target = np.asarray(last_opt_result["target_amplitude"], dtype=float).copy()
+    measured_raw = np.asarray(get_image_func(), dtype=float)
+
+    if measured_raw.shape != current_target.shape:
+        raise ValueError(
+            "Feedback measurement shape does not match the current target. "
+            f"measurement_shape={measured_raw.shape}, target_shape={current_target.shape}."
+        )
+
+    signal_mask = _feedback_signal_mask(measured_raw)
+    target_power = float(cfg.input_power_norm)
+    T0 = _normalize_feedback_array(original_target * signal_mask, target_power, "Original feedback target")
+    Ti = _normalize_feedback_array(current_target * signal_mask, target_power, "Current feedback target")
+    M = _normalize_feedback_array(measured_raw * signal_mask, target_power, "Measured feedback image")
+
+    D = T0 - M
     if smoothing_func is not None:
-        D = smoothing_func(D)
-    cg_opt_result = cg_optimize_with_target(cfg, Ta_np + D, last_opt_result)
+        D = np.asarray(smoothing_func(D), dtype=float)
+        if D.shape != T0.shape:
+            raise ValueError(f"smoothing_func changed D shape from {T0.shape} to {D.shape}.")
+        D *= signal_mask
+
+    next_target = signal_mask * (Ti + float(alpha) * D)
+    next_target = np.clip(next_target, 0.0, None)
+    next_target = _normalize_feedback_array(next_target, target_power, "Next feedback target")
+
+    rmse, psnr = _feedback_error_metrics(T0, M, signal_mask)
+    cg_opt_result = cg_optimize_with_target(cfg, next_target.copy(), last_opt_result)
+
+    history = list(last_opt_result.get("feedback_history", []))
+    history.append(
+        {
+            "alpha": float(alpha),
+            "rmse": rmse,
+            "psnr": psnr,
+        }
+    )
+    cg_opt_result["feedback_original_target"] = T0
+    cg_opt_result["feedback_current_target"] = Ti
+    cg_opt_result["feedback_measured"] = M
+    cg_opt_result["feedback_discrepancy"] = D
+    cg_opt_result["feedback_next_target_input"] = next_target
+    cg_opt_result["feedback_signal_mask"] = signal_mask
+    cg_opt_result["feedback_alpha"] = float(alpha)
+    cg_opt_result["feedback_rmse"] = rmse
+    cg_opt_result["feedback_psnr"] = psnr
+    cg_opt_result["feedback_history"] = history
     return cg_opt_result
