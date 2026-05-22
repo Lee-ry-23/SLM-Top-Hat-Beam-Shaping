@@ -59,8 +59,11 @@ class Config:
     rect_width_x_um: float = 500.0
     rect_width_y_um: float = 100.0
 
-    # Edge smoothing for soft boundaries.
-    blur_sigma: float = 5.0
+    # Gaussian PSF used to blur the ideal target in the focal plane.
+    # Use None to estimate from beam size, focal length, SLM sampling, and camera pixels.
+    target_psf_sigma_x_um: float | None = None
+    target_psf_sigma_y_um: float | None = None
+    target_psf_truncate: float = 4.0
 
     # Optional linear phase tilt in the Fourier plane.
     kx: float = 0.0
@@ -74,7 +77,8 @@ class Config:
     init_phase_b: float = 0.0
 
     # Loss scaling: loss = 10**C1 * (1 - overlap)^2.
-    C1: float = 9.0
+    C1: float = 12.0
+    C2: float = 0  # efficiency term coefficient
 
     # Normalize the input beam to a fixed total amplitude scale.
     input_power_norm: float = 10000.0
@@ -101,7 +105,7 @@ class Config:
 
     # Optimizer settings.
     optimizer_method: str = "CG"
-    optimizer_maxiter: int = 200
+    optimizer_maxiter: int = 100
     optimizer_disp: bool = True
 
     # Plotting and saving switches.
@@ -117,9 +121,9 @@ class Config:
         default_factory=lambda: {
             # "beam_diameter_x_mm": np.linspace(1.5, 3.0, 10),
             # "lens_focal_length_mm": np.linspace(50.0, 300.0, 20),
-            # "curv": np.linspace(0.0, 10.0, 6),
-            "rect_width_x_um": np.linspace(50.0, 300.0, 10),
-            "rect_width_y_um": np.linspace(5.0, 40.0, 10),
+            "curv": np.linspace(0, 2.0, 20),
+            "rect_width_x_um": np.linspace(50.0, 300.0, 20),
+            # "rect_width_y_um": np.linspace(5.0, 40.0, 10),
         }
     )
     scan_linked_parameters: dict[str, list[str]] = field(

@@ -75,7 +75,10 @@ def cg_optimize(cfg):
         overlap = torch.sum(Ta * amp * Wcg * torch.cos(ph - P))
         overlap /= torch.sqrt(torch.sum(Ta**2) * torch.sum((amp * Wcg)**2))
 
-        loss = (10**cfg.C1) * (1 - overlap)**2
+        # add the efficiency term
+        efficiency = torch.sum(amp * Wcg) / torch.sum(amp**2)
+
+        loss = (10**cfg.C1) * ((1 - overlap)**2 - cfg.C2 * (efficiency - 1))
         loss.backward()
         logger.log_evaluation(loss.item())
 

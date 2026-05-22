@@ -1,5 +1,6 @@
 import numpy as np
 import scipy
+import scipy.signal
 import h5py
 import matplotlib.pyplot as plt
 from scipy.ndimage import binary_dilation, convolve, gaussian_filter
@@ -213,29 +214,91 @@ def load_measured_power_h5(
     return amplitude / np.max(amplitude)
 
 
-def flat_top_rect_physical(x_axis, y_axis, width_x_um, width_y_um, edge_width_x_um, A=1.0):
-    """
-    Line-shape target defined directly on physical focal-plane coordinates.
-    """
-
-    X, Y = np.meshgrid(x_axis, y_axis, indexing='xy')
-    dx = np.abs(X) - width_x_um / 2
-    soft_x = 0.5 * (1 - np.tanh(dx / edge_width_x_um))
-    gaussian_y = np.exp(-2 * (Y**2) / (width_y_um**2))
-    return A * soft_x * gaussian_y
+def ideal_line_shape_target(x_axis: np.ndarray, y_axis: np.ndarray, width_x_um: float, gaussian_diameter_y_um: float) -> np.ndarray:
+    X, Y = np.meshgrid(x_axis, y_axis, indexing="xy")
+    top_hat_x = (np.abs(X) <= width_x_um / 2).astype(float)
+    radius_y_um = gaussian_diameter_y_um / 2
+    if radius_y_um <= 0:
+        raise ValueError(f"gaussian_diameter_y_um must be positive, got {gaussian_diameter_y_um}.")
+    gaussian_y = np.exp(-2 * (Y / radius_y_um) ** 2)
+    return top_hat_x * gaussian_y
 
 
-def flat_top_box_physical(x_axis, y_axis, width_x_um, width_y_um, edge_width_x_um, edge_width_y_um, A=1.0):
-    """
-    Rectangle target defined directly on physical focal-plane coordinates.
-    """
+def ideal_rectangle_target(x_axis: np.ndarray, y_axis: np.ndarray, width_x_um: float, width_y_um: float) -> np.ndarray:
+    X, Y = np.meshgrid(x_axis, y_axis, indexing="xy")
+    top_hat_x = np.abs(X) <= width_x_um / 2
+    top_hat_y = np.abs(Y) <= width_y_um / 2
+    return (top_hat_x & top_hat_y).astype(float)
 
-    X, Y = np.meshgrid(x_axis, y_axis, indexing='xy')
-    dx = np.abs(X) - width_x_um / 2
-    dy = np.abs(Y) - width_y_um / 2
-    soft_x = 0.5 * (1 - np.tanh(dx / edge_width_x_um))
-    soft_y = 0.5 * (1 - np.tanh(dy / edge_width_y_um))
-    return A * soft_x * soft_y
+
+def estimate_target_psf_sigma_um(cfg) -> tuple[float, float]:
+    wavelength_um = cfg.wavelength_nm / 1e3
+    focal_length_um = cfg.lens_focal_length_mm * 1e3
+    beam_radius_x_um = cfg.beam_diameter_x_mm * 1e3 / 2
+    beam_radius_y_um = cfg.beam_diameter_y_mm * 1e3 / 2
+    if beam_radius_x_um <= 0 or beam_radius_y_um <= 0:
+        raise ValueError(
+            "Beam diameters must be positive to estimate target PSF. "
+            f"beam_diameter_x_mm={cfg.beam_diameter_x_mm}, beam_diameter_y_mm={cfg.beam_diameter_y_mm}."
+        )
+
+    diffraction_sigma_x_um = wavelength_um * focal_length_um / (np.sqrt(2) * np.pi * beam_radius_x_um)
+    diffraction_sigma_y_um = wavelength_um * focal_length_um / (np.sqrt(2) * np.pi * beam_radius_y_um)
+    camera_sigma_um = cfg.camera_pixel_size_um / np.sqrt(12)
+    sampling_delta_x_um, sampling_delta_y_um = get_focal_plane_sampling_um(cfg)
+    sampling_sigma_x_um = sampling_delta_x_um / np.sqrt(12)
+    sampling_sigma_y_um = sampling_delta_y_um / np.sqrt(12)
+
+    sigma_x_um = np.sqrt(diffraction_sigma_x_um**2 + camera_sigma_um**2 + sampling_sigma_x_um**2)
+    sigma_y_um = np.sqrt(diffraction_sigma_y_um**2 + camera_sigma_um**2 + sampling_sigma_y_um**2)
+    return float(sigma_x_um), float(sigma_y_um)
+
+
+def resolve_target_psf_sigma_um(cfg) -> tuple[float, float]:
+    estimated_sigma_x_um, estimated_sigma_y_um = estimate_target_psf_sigma_um(cfg)
+    sigma_x_um = estimated_sigma_x_um if cfg.target_psf_sigma_x_um is None else float(cfg.target_psf_sigma_x_um)
+    sigma_y_um = estimated_sigma_y_um if cfg.target_psf_sigma_y_um is None else float(cfg.target_psf_sigma_y_um)
+    if sigma_x_um < 0 or sigma_y_um < 0:
+        raise ValueError(f"Target PSF sigma values must be non-negative, got sigma_x={sigma_x_um}, sigma_y={sigma_y_um}.")
+    return sigma_x_um, sigma_y_um
+
+
+def build_gaussian_psf_kernel(
+    delta_x_um: float,
+    delta_y_um: float,
+    sigma_x_um: float,
+    sigma_y_um: float,
+    truncate: float,
+) -> np.ndarray:
+    if sigma_x_um < 0 or sigma_y_um < 0:
+        raise ValueError(f"PSF sigma values must be non-negative, got sigma_x={sigma_x_um}, sigma_y={sigma_y_um}.")
+    if truncate <= 0:
+        raise ValueError(f"target_psf_truncate must be positive, got {truncate}.")
+    if sigma_x_um == 0 and sigma_y_um == 0:
+        return np.array([[1.0]], dtype=float)
+
+    sigma_x_px = max(sigma_x_um / delta_x_um, np.finfo(float).eps)
+    sigma_y_px = max(sigma_y_um / delta_y_um, np.finfo(float).eps)
+    radius_x = max(1, int(np.ceil(truncate * sigma_x_px)))
+    radius_y = max(1, int(np.ceil(truncate * sigma_y_px)))
+    x = np.arange(-radius_x, radius_x + 1, dtype=float)
+    y = np.arange(-radius_y, radius_y + 1, dtype=float)
+    X, Y = np.meshgrid(x, y, indexing="xy")
+    kernel = np.exp(-0.5 * ((X / sigma_x_px) ** 2 + (Y / sigma_y_px) ** 2))
+    kernel_sum = float(np.sum(kernel))
+    if kernel_sum <= 0:
+        raise ValueError("Gaussian PSF kernel has zero total weight.")
+    return kernel / kernel_sum
+
+
+def convolve_target_with_psf(target: np.ndarray, psf_kernel: np.ndarray) -> np.ndarray:
+    target_array = np.asarray(target, dtype=float)
+    kernel_array = np.asarray(psf_kernel, dtype=float)
+    if target_array.ndim != 2:
+        raise ValueError(f"Target must be 2D, got shape {target_array.shape}.")
+    if kernel_array.ndim != 2:
+        raise ValueError(f"PSF kernel must be 2D, got shape {kernel_array.shape}.")
+    return scipy.signal.fftconvolve(target_array, kernel_array, mode="same")
 
 
 def smooth_with_gaussian(z, sigma):
@@ -345,29 +408,34 @@ def get_focal_plane_axes_um(cfg):
 def build_target(cfg):
     focal_x_um, focal_y_um = get_focal_plane_axes_um(cfg)
     delta_x_um, delta_y_um = get_focal_plane_sampling_um(cfg)
-    edge_width_x_um = max(delta_x_um, cfg.blur_sigma * delta_x_um)
-    edge_width_y_um = max(delta_y_um, cfg.blur_sigma * delta_y_um)
 
     if cfg.target_mode == "line_shape":
-        return flat_top_rect_physical(
+        ideal_target = ideal_line_shape_target(
             focal_x_um,
             focal_y_um,
             cfg.line_width_x_um,
             cfg.line_width_y_um,
-            edge_width_x_um,
         )
-
-    if cfg.target_mode == "rectangle":
-        return flat_top_box_physical(
+    elif cfg.target_mode == "rectangle":
+        ideal_target = ideal_rectangle_target(
             focal_x_um,
             focal_y_um,
             cfg.rect_width_x_um,
             cfg.rect_width_y_um,
-            edge_width_x_um,
-            edge_width_y_um,
         )
+    else:
+        raise ValueError(f"Unsupported target_mode: {cfg.target_mode}")
 
-    raise ValueError(f"Unsupported target_mode: {cfg.target_mode}")
+    psf_sigma_x_um, psf_sigma_y_um = resolve_target_psf_sigma_um(cfg)
+    psf_kernel = build_gaussian_psf_kernel(
+        delta_x_um,
+        delta_y_um,
+        psf_sigma_x_um,
+        psf_sigma_y_um,
+        cfg.target_psf_truncate,
+    )
+    target = convolve_target_with_psf(ideal_target, psf_kernel)
+    return np.clip(target, 0.0, None)
 
 
 def build_weighting_mask(cfg, target=None):
