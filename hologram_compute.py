@@ -193,7 +193,8 @@ def cg_optimize_with_target(cfg, Ta_np, last_opt_result):
         amp = torch.abs(E_out)
         ph = torch.angle(E_out)
 
-        overlap = torch.sum(Ta * amp * Wcg * torch.cos(ph - P))
+        # here we only consider the amp, no longer phase constraint
+        overlap = torch.sum(Ta * amp * Wcg)
         overlap /= torch.sqrt(torch.sum(Ta**2) * torch.sum((amp * Wcg)**2))
 
         loss = (10**cfg.C1) * (1 - overlap)**2
