@@ -330,8 +330,8 @@ def _build_axis_feedback_target(T0, Ti, M, signal_mask, optimize_axis, alpha):
     next_y = Ti_y + float(alpha) * (T0_y - M_y) if "y" in axes else T0_y
     next_x = np.clip(next_x, 0.0, None)
     next_y = np.clip(next_y, 0.0, None)
-    next_x = np.where(Ti_x > 0, next_x, 0)
-    next_y = np.where(Ti_y > 0, next_y, 0)
+    next_x = np.where(Ti_x > M_x, next_x, 0)
+    next_y = np.where(Ti_y > M_y, next_y, 0)
 
     if np.max(next_x) <= 0 or np.max(next_y) <= 0:
         raise ValueError("Axis feedback produced an empty target profile.")
