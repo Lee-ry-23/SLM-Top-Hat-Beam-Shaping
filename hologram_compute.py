@@ -147,7 +147,7 @@ def cg_optimize(cfg):
         "device": str(device),
     }
 
-def cg_optimize_with_target(cfg, Ta_np, last_opt_result):
+def cg_optimize_with_target(cfg, Ta_np, last_opt_result, optimize_phase=False):
     cfg.update_derived()
     total_start = perf_counter()
 
@@ -193,8 +193,10 @@ def cg_optimize_with_target(cfg, Ta_np, last_opt_result):
         amp = torch.abs(E_out)
         ph = torch.angle(E_out)
 
-        # here we only consider the amp, no longer phase constraint
-        overlap = torch.sum(Ta * amp * Wcg)
+        if optimize_phase:
+            overlap = torch.sum(Ta * amp * Wcg * torch.cos(ph - P))
+        else:
+            overlap = torch.sum(Ta * amp * Wcg)
         overlap /= torch.sqrt(torch.sum(Ta**2) * torch.sum((amp * Wcg)**2))
 
         loss = (10**cfg.C1) * (1 - overlap)**2
@@ -264,6 +266,7 @@ def cg_optimize_with_target(cfg, Ta_np, last_opt_result):
         "optimization_time_sec": optimization_time_sec,
         "total_time_sec": total_time_sec,
         "device": str(device),
+        "optimize_phase": optimize_phase,
     }
 
 
@@ -294,7 +297,58 @@ def _feedback_error_metrics(target, measured, signal_mask):
     return rmse, psnr
 
 
-def cg_optimize_optical_feedback(cfg, get_image_func, last_opt_result, smoothing_func=None, alpha=1.0):
+def _normalize_optimize_axis(optimize_axis):
+    if isinstance(optimize_axis, str):
+        axes = [optimize_axis]
+    else:
+        axes = list(optimize_axis)
+    axes = [axis.lower() for axis in axes]
+    invalid_axes = sorted(set(axes) - {"x", "y"})
+    if invalid_axes:
+        raise ValueError(f"optimize_axis only supports 'x' and 'y', got {invalid_axes}.")
+    if not axes:
+        raise ValueError("optimize_axis must contain at least one axis.")
+    return tuple(dict.fromkeys(axes))
+
+
+def _center_profiles(data):
+    array = np.asarray(data, dtype=float)
+    if array.ndim != 2:
+        raise ValueError(f"Center profile extraction expects a 2D array, got shape {array.shape}.")
+    center_y = array.shape[0] // 2
+    center_x = array.shape[1] // 2
+    return array[center_y, :].copy(), array[:, center_x].copy()
+
+
+def _build_axis_feedback_target(T0, Ti, M, signal_mask, optimize_axis, alpha):
+    axes = _normalize_optimize_axis(optimize_axis)
+    T0_x, T0_y = _center_profiles(T0)
+    Ti_x, Ti_y = _center_profiles(Ti)
+    M_x, M_y = _center_profiles(M)
+
+    next_x = Ti_x + float(alpha) * (T0_x - M_x) if "x" in axes else T0_x
+    next_y = Ti_y + float(alpha) * (T0_y - M_y) if "y" in axes else T0_y
+    next_x = np.clip(next_x, 0.0, None)
+    next_y = np.clip(next_y, 0.0, None)
+
+    if np.max(next_x) <= 0 or np.max(next_y) <= 0:
+        raise ValueError("Axis feedback produced an empty target profile.")
+
+    next_x /= np.max(next_x)
+    next_y /= np.max(next_y)
+    return np.outer(next_y, next_x) * signal_mask
+
+
+def cg_optimize_optical_feedback(
+    cfg,
+    get_image_func,
+    last_opt_result,
+    smoothing_func=None,
+    alpha=1.0,
+    optimize_phase=False,
+    optimize_axis=("x",),
+    whole_plane_optimize=False,
+):
     cfg.update_derived()
 
     original_target = np.asarray(
@@ -316,26 +370,41 @@ def cg_optimize_optical_feedback(cfg, get_image_func, last_opt_result, smoothing
     Ti = _normalize_feedback_array(current_target * signal_mask, target_power, "Current feedback target")
     M = _normalize_feedback_array(measured_raw * signal_mask, target_power, "Measured feedback image")
 
-    D = T0 - M
+    if whole_plane_optimize:
+        D = float(alpha) * (T0 - M)
+        next_target = signal_mask * (Ti + D)
+    else:
+        next_target = _build_axis_feedback_target(T0, Ti, M, signal_mask, optimize_axis, alpha)
+        D = next_target - Ti
+
     if smoothing_func is not None:
         D = np.asarray(smoothing_func(D), dtype=float)
         if D.shape != T0.shape:
             raise ValueError(f"smoothing_func changed D shape from {T0.shape} to {D.shape}.")
         D *= signal_mask
+        next_target = signal_mask * (Ti + D)
 
-    next_target = signal_mask * (Ti + float(alpha) * D)
     next_target = np.clip(next_target, 0.0, None)
     next_target = _normalize_feedback_array(next_target, target_power, "Next feedback target")
 
     rmse, psnr = _feedback_error_metrics(T0, M, signal_mask)
-    cg_opt_result = cg_optimize_with_target(cfg, next_target.copy(), last_opt_result)
+    cg_opt_result = cg_optimize_with_target(
+        cfg,
+        next_target.copy(),
+        last_opt_result,
+        optimize_phase=optimize_phase,
+    )
 
+    axes = _normalize_optimize_axis(optimize_axis)
     history = list(last_opt_result.get("feedback_history", []))
     history.append(
         {
             "alpha": float(alpha),
             "rmse": rmse,
             "psnr": psnr,
+            "optimize_phase": bool(optimize_phase),
+            "optimize_axis": axes,
+            "whole_plane_optimize": bool(whole_plane_optimize),
         }
     )
     cg_opt_result["feedback_original_target"] = T0
@@ -345,6 +414,9 @@ def cg_optimize_optical_feedback(cfg, get_image_func, last_opt_result, smoothing
     cg_opt_result["feedback_next_target_input"] = next_target
     cg_opt_result["feedback_signal_mask"] = signal_mask
     cg_opt_result["feedback_alpha"] = float(alpha)
+    cg_opt_result["feedback_optimize_phase"] = bool(optimize_phase)
+    cg_opt_result["feedback_optimize_axis"] = axes
+    cg_opt_result["feedback_whole_plane_optimize"] = bool(whole_plane_optimize)
     cg_opt_result["feedback_rmse"] = rmse
     cg_opt_result["feedback_psnr"] = psnr
     cg_opt_result["feedback_history"] = history
