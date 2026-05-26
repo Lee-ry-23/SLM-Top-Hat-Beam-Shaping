@@ -341,6 +341,26 @@ def _build_axis_feedback_target(T0, Ti, M, signal_mask, optimize_axis, alpha):
     return np.outer(next_y, next_x) * signal_mask
 
 
+def _build_cropped_feedback_pair(target, measured, signal_mask, target_power, crop_threshold):
+    target_array = np.asarray(target, dtype=float) * signal_mask
+    measured_array = np.asarray(measured, dtype=float) * signal_mask
+    target_peak = float(np.max(target_array))
+    if target_peak <= 0:
+        raise ValueError("Feedback target contains no positive values for image cropping.")
+
+    crop_mask = (target_array > float(crop_threshold) * target_peak) & (signal_mask > 0)
+    if not np.any(crop_mask):
+        raise ValueError(
+            "Feedback crop mask is empty. "
+            f"crop_threshold={crop_threshold}, target_peak={target_peak}."
+        )
+
+    measured_crop = np.where(crop_mask, measured_array, 0.0)
+    target_norm = _normalize_feedback_array(target_array, target_power, "Feedback target")
+    measured_norm = _normalize_feedback_array(measured_crop, target_power, "Cropped measured feedback image")
+    return target_norm, measured_norm, crop_mask.astype(float)
+
+
 def cg_optimize_optical_feedback(
     cfg,
     get_image_func,
@@ -350,6 +370,7 @@ def cg_optimize_optical_feedback(
     optimize_phase=False,
     optimize_axis=("x",),
     whole_plane_optimize=False,
+    feedback_crop_threshold=0.1,
 ):
     cfg.update_derived()
 
@@ -369,14 +390,19 @@ def cg_optimize_optical_feedback(
     signal_mask = _feedback_signal_mask(measured_raw)
     target_power = float(cfg.input_power_norm)
     T0 = _normalize_feedback_array(original_target * signal_mask, target_power, "Original feedback target")
-    Ti = _normalize_feedback_array(current_target * signal_mask, target_power, "Current feedback target")
-    M = _normalize_feedback_array(measured_raw * signal_mask, target_power, "Measured feedback image")
+    Ti, M, feedback_crop_mask = _build_cropped_feedback_pair(
+        current_target,
+        measured_raw,
+        signal_mask,
+        target_power,
+        feedback_crop_threshold,
+    )
 
     if whole_plane_optimize:
-        D = float(alpha) * (T0 - M)
-        next_target = signal_mask * (Ti + D)
+        D = Ti - M
+        next_target = signal_mask * (Ti + float(alpha) * D)
     else:
-        next_target = _build_axis_feedback_target(T0, Ti, M, signal_mask, optimize_axis, alpha)
+        next_target = _build_axis_feedback_target(Ti, Ti, M, signal_mask, optimize_axis, alpha)
         D = next_target - Ti
 
     if smoothing_func is not None:
@@ -384,7 +410,7 @@ def cg_optimize_optical_feedback(
         if D.shape != T0.shape:
             raise ValueError(f"smoothing_func changed D shape from {T0.shape} to {D.shape}.")
         D *= signal_mask
-        next_target = signal_mask * (Ti + D)
+        next_target = signal_mask * (Ti + float(alpha) * D) if whole_plane_optimize else signal_mask * (Ti + D)
 
     next_target = np.clip(next_target, 0.0, None)
     next_target = _normalize_feedback_array(next_target, target_power, "Next feedback target")
@@ -407,6 +433,7 @@ def cg_optimize_optical_feedback(
             "optimize_phase": bool(optimize_phase),
             "optimize_axis": axes,
             "whole_plane_optimize": bool(whole_plane_optimize),
+            "feedback_crop_threshold": float(feedback_crop_threshold),
         }
     )
     cg_opt_result["feedback_original_target"] = T0
@@ -415,7 +442,9 @@ def cg_optimize_optical_feedback(
     cg_opt_result["feedback_discrepancy"] = D
     cg_opt_result["feedback_next_target_input"] = next_target
     cg_opt_result["feedback_signal_mask"] = signal_mask
+    cg_opt_result["feedback_crop_mask"] = feedback_crop_mask
     cg_opt_result["feedback_alpha"] = float(alpha)
+    cg_opt_result["feedback_crop_threshold"] = float(feedback_crop_threshold)
     cg_opt_result["feedback_optimize_phase"] = bool(optimize_phase)
     cg_opt_result["feedback_optimize_axis"] = axes
     cg_opt_result["feedback_whole_plane_optimize"] = bool(whole_plane_optimize)
