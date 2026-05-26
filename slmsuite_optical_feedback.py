@@ -517,9 +517,24 @@ def _rotate_camera_image_for_feedback(cfg, camera_image: npt.ArrayLike) -> npt.N
 
     return np.rot90(image, k=(rotation_deg // 90) % 4)
 
+def _upside_down_camera_image_for_feedback(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
+    image = _as_float_image(camera_image)
+    if cfg.feedback_camera_vertical_flip == True:
+        return np.flip(image, axis=(0, 1))
+    else:
+        return image
 
+def _left_right_flip_camera_image_for_feedback(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
+    image = _as_float_image(camera_image)
+    if cfg.feedback_camera_horizontal_flip == True:
+        return np.flip(image, axis=(1,))
+    else:
+        return image
+    
 def _prepare_camera_image(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
     image = _rotate_camera_image_for_feedback(cfg, camera_image)
+    image = _upside_down_camera_image_for_feedback(cfg, image)
+    image = _left_right_flip_camera_image_for_feedback(cfg, image)
     background_percentile = float(cfg.feedback_background_percentile)
     background = float(np.percentile(image, background_percentile))
     image = np.clip(image - background, 0.0, None)
