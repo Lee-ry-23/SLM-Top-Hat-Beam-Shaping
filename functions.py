@@ -524,7 +524,7 @@ def fitting_input_beam(cfg):
     camera = SimulatedCamera(slm, resolution=cam_size)
     fs = FourierSLM(camera, slm)
 
-    fs.load_calibration(cfg.input_beam_h5_path)
+    fs.load_calibration("wavefront_superpixel", file_path=cfg.input_beam_h5_path)
     calibration_results = fs.wavefront_calibration_superpixel_process(
         plot=False,
         r2_threshold=.5,
