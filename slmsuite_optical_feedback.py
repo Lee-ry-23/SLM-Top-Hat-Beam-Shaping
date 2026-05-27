@@ -25,6 +25,7 @@ class FeedbackFitResult(TypedDict):
     support_center_xy_px: tuple[float, float]
     support_diameter_px: float
     feedback_scale_factor: float
+    alignment_cost: float
     extracted_image: npt.NDArray[np.float64]
 
 
@@ -41,7 +42,7 @@ def preview_feedback_zoom(
     center_xy_px: tuple[float, float],
     crop_shape_yx_px: tuple[int, int],
 ) -> None:
-    image = _rotate_camera_image_for_feedback(cfg, camera_image)
+    image = _orient_camera_image_for_feedback(cfg, camera_image)
     crop = _crop_image(image, center_xy_px, crop_shape_yx_px)
     crop_y0, crop_x0 = _crop_origin(image.shape, center_xy_px, crop_shape_yx_px)
 
@@ -133,6 +134,15 @@ def fit_feedback_extraction(
         crop_shape_yx_px,
     )
     feedback_scale = _feedback_scale_factor(cfg, target, support_diameter)
+    support_center, alignment_cost = _refine_support_center_by_profile_alignment(
+        cfg,
+        image,
+        target,
+        support_center,
+        fitted_angle,
+        support_diameter,
+        feedback_scale,
+    )
     extracted_image, support_mask = extract_feedback_image_with_support(
         cfg,
         camera_image,
@@ -152,6 +162,7 @@ def fit_feedback_extraction(
         "support_center_xy_px": support_center,
         "support_diameter_px": support_diameter,
         "feedback_scale_factor": feedback_scale,
+        "alignment_cost": alignment_cost,
         "extracted_image": extracted_image,
     }
 
@@ -162,7 +173,7 @@ def plot_feedback_extraction(
     fit_result: FeedbackFitResult,
     crop_shape_yx_px: tuple[int, int],
 ) -> None:
-    image = _rotate_camera_image_for_feedback(cfg, camera_image)
+    image = _orient_camera_image_for_feedback(cfg, camera_image)
     center_xy_px = fit_result["center_xy_px"]
     crop = _crop_image(image, center_xy_px, crop_shape_yx_px)
     crop_y0, crop_x0 = _crop_origin(image.shape, center_xy_px, crop_shape_yx_px)
@@ -247,8 +258,10 @@ def plot_feedback_extraction(
     _apply_square_axes(axes[1, 1], focal_x_um, focal_y_um)
     fig.colorbar(im_feedback, ax=axes[1, 1], shrink=0.82)
 
+    alignment_cost = fit_result.get("alignment_cost", np.nan)
     fig.suptitle(
         f"Optical feedback extraction, fit cost={fit_result['cost']:.3e}, "
+        f"alignment cost={alignment_cost:.3e}, "
         f"diameter={fit_result['support_diameter_px']:.1f} px, scale={fit_result['feedback_scale_factor']:.3f}"
     )
     plt.show()
@@ -515,26 +528,20 @@ def _rotate_camera_image_for_feedback(cfg, camera_image: npt.ArrayLike) -> npt.N
             f"Got {cfg.feedback_camera_rotation_deg}."
         )
 
-    return np.rot90(image, k=(rotation_deg // 90) % 4)
+    return np.rot90(image, k=(-(rotation_deg // 90)) % 4)
 
-def _upside_down_camera_image_for_feedback(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
-    image = _as_float_image(camera_image)
-    if cfg.feedback_camera_vertical_flip == True:
-        return np.flip(image, axis=(0, 1))
-    else:
-        return image
 
-def _left_right_flip_camera_image_for_feedback(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
-    image = _as_float_image(camera_image)
-    if cfg.feedback_camera_horizontal_flip == True:
-        return np.flip(image, axis=(1,))
-    else:
-        return image
-    
-def _prepare_camera_image(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
+def _orient_camera_image_for_feedback(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
     image = _rotate_camera_image_for_feedback(cfg, camera_image)
-    image = _upside_down_camera_image_for_feedback(cfg, image)
-    image = _left_right_flip_camera_image_for_feedback(cfg, image)
+    if bool(cfg.feedback_camera_vertical_flip):
+        image = np.flip(image, axis=0)
+    if bool(cfg.feedback_camera_horizontal_flip):
+        image = np.flip(image, axis=1)
+    return np.asarray(image, dtype=float)
+
+
+def _prepare_camera_image(cfg, camera_image: npt.ArrayLike) -> npt.NDArray[np.float64]:
+    image = _orient_camera_image_for_feedback(cfg, camera_image)
     background_percentile = float(cfg.feedback_background_percentile)
     background = float(np.percentile(image, background_percentile))
     image = np.clip(image - background, 0.0, None)
@@ -767,6 +774,116 @@ def _feedback_scale_factor(
     if experimental_width_um <= 0:
         raise ValueError(f"Experimental width must be positive, got {experimental_width_um}.")
     return target_width_um / experimental_width_um
+
+
+def _refine_support_center_by_profile_alignment(
+    cfg,
+    image: npt.NDArray[np.float64],
+    target: npt.NDArray[np.float64],
+    support_center_xy_px: tuple[float, float],
+    angle_deg: float,
+    support_diameter_px: float,
+    feedback_scale_factor: float,
+) -> tuple[tuple[float, float], float]:
+    search_radius_px = min(float(cfg.feedback_center_search_radius_px), max(2.0, support_diameter_px / 3.0))
+    if search_radius_px <= 0:
+        raise ValueError(f"feedback_center_search_radius_px must be positive, got {cfg.feedback_center_search_radius_px}.")
+
+    center_x, center_y = support_center_xy_px
+    bounds = [
+        (max(0.0, center_x - search_radius_px), min(float(image.shape[1] - 1), center_x + search_radius_px)),
+        (max(0.0, center_y - search_radius_px), min(float(image.shape[0] - 1), center_y + search_radius_px)),
+    ]
+
+    def objective(params: npt.NDArray[np.float64]) -> float:
+        return _feedback_profile_alignment_cost(
+            cfg,
+            image,
+            target,
+            (float(params[0]), float(params[1])),
+            angle_deg,
+            support_diameter_px,
+            feedback_scale_factor,
+        )
+
+    result = scipy.optimize.minimize(
+        objective,
+        x0=np.array([center_x, center_y], dtype=float),
+        method="L-BFGS-B",
+        bounds=bounds,
+    )
+    if not result.success or float(result.fun) >= 1e11:
+        raise RuntimeError(
+            "Feedback profile alignment failed: "
+            f"message={result.message}, cost={float(result.fun):.3e}, "
+            f"support_center_xy_px={support_center_xy_px}."
+        )
+
+    return (float(result.x[0]), float(result.x[1])), float(result.fun)
+
+
+def _feedback_profile_alignment_cost(
+    cfg,
+    image: npt.NDArray[np.float64],
+    target: npt.NDArray[np.float64],
+    support_center_xy_px: tuple[float, float],
+    angle_deg: float,
+    support_diameter_px: float,
+    feedback_scale_factor: float,
+) -> float:
+    coords_y, coords_x = _feedback_sampling_coordinates_scaled(
+        cfg,
+        support_center_xy_px,
+        angle_deg,
+        feedback_scale_factor,
+    )
+    support_mask = _support_mask_from_camera_coordinates(coords_y, coords_x, support_center_xy_px, support_diameter_px)
+    target_mask = _target_alignment_mask(cfg, target)
+    active_mask = support_mask * target_mask
+    if not np.any(active_mask > 0):
+        return 1e12
+    if not _active_region_is_inside_camera(image.shape, coords_y, coords_x, active_mask):
+        return 1e12
+
+    sampled = _sample_camera_image(image, coords_y, coords_x)
+    sampled_amplitude = _camera_signal_to_feedback_amplitude(cfg, sampled)
+    try:
+        return _profile_shape_cost(target, sampled_amplitude, active_mask)
+    except ValueError:
+        return 1e12
+
+
+def _target_alignment_mask(cfg, target: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    peak = float(np.max(np.abs(target)))
+    if peak <= 0:
+        raise ValueError("Cannot build alignment mask because target has no positive signal.")
+    threshold_fraction = max(float(cfg.weighting_threshold), float(cfg.feedback_edge_threshold_fraction))
+    return (np.abs(target) > threshold_fraction * peak).astype(float)
+
+
+def _profile_shape_cost(
+    target: npt.NDArray[np.float64],
+    sampled_amplitude: npt.NDArray[np.float64],
+    active_mask: npt.NDArray[np.float64],
+) -> float:
+    target_intensity = (np.clip(target, 0.0, None) * active_mask) ** 2
+    sampled_intensity = (np.clip(sampled_amplitude, 0.0, None) * active_mask) ** 2
+
+    target_x = _normalized_profile(np.sum(target_intensity, axis=0))
+    sampled_x = _normalized_profile(np.sum(sampled_intensity, axis=0))
+    target_y = _normalized_profile(np.sum(target_intensity, axis=1))
+    sampled_y = _normalized_profile(np.sum(sampled_intensity, axis=1))
+
+    return float(np.mean((target_x - sampled_x) ** 2) + np.mean((target_y - sampled_y) ** 2))
+
+
+def _normalized_profile(profile: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    values = np.asarray(profile, dtype=float)
+    values = np.clip(values, 0.0, None)
+    norm = float(np.sqrt(np.sum(values**2)))
+    if norm <= 0:
+        raise ValueError("Cannot normalize an empty feedback alignment profile.")
+    return values / norm
 
 
 def _target_x_width_um(cfg, target: npt.NDArray[np.float64]) -> float:

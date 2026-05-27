@@ -95,6 +95,8 @@ class Config:
     feedback_crop_shape_yx_px: tuple[int, int] = (300, 300)
     # Counter-clockwise raw camera image rotation before feedback extraction.
     feedback_camera_rotation_deg: int = 0
+    feedback_camera_vertical_flip: bool = False
+    feedback_camera_horizontal_flip: bool = False
     feedback_angle_guess_deg: float = 0.0
     feedback_angle_search_radius_deg: float = 8.0
     feedback_center_search_radius_px: float = 30.0
