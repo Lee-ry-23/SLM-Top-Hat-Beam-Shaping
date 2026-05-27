@@ -134,7 +134,7 @@ def fit_feedback_extraction(
         crop_shape_yx_px,
     )
     feedback_scale = _feedback_scale_factor(cfg, target, support_diameter)
-    support_center, alignment_cost = _refine_support_center_by_profile_alignment(
+    support_center, feedback_scale, alignment_cost = _refine_feedback_alignment(
         cfg,
         image,
         target,
@@ -776,7 +776,7 @@ def _feedback_scale_factor(
     return target_width_um / experimental_width_um
 
 
-def _refine_support_center_by_profile_alignment(
+def _refine_feedback_alignment(
     cfg,
     image: npt.NDArray[np.float64],
     target: npt.NDArray[np.float64],
@@ -784,15 +784,24 @@ def _refine_support_center_by_profile_alignment(
     angle_deg: float,
     support_diameter_px: float,
     feedback_scale_factor: float,
-) -> tuple[tuple[float, float], float]:
+) -> tuple[tuple[float, float], float, float]:
     search_radius_px = min(float(cfg.feedback_center_search_radius_px), max(2.0, support_diameter_px / 3.0))
     if search_radius_px <= 0:
         raise ValueError(f"feedback_center_search_radius_px must be positive, got {cfg.feedback_center_search_radius_px}.")
 
+    scale_fraction = float(cfg.feedback_scale_search_fraction)
+    if scale_fraction <= 0:
+        raise ValueError(f"feedback_scale_search_fraction must be positive, got {cfg.feedback_scale_search_fraction}.")
+    if feedback_scale_factor <= 0:
+        raise ValueError(f"feedback_scale_factor must be positive, got {feedback_scale_factor}.")
+
     center_x, center_y = support_center_xy_px
+    min_scale = max(np.finfo(float).eps, feedback_scale_factor * (1.0 - scale_fraction))
+    max_scale = feedback_scale_factor * (1.0 + scale_fraction)
     bounds = [
         (max(0.0, center_x - search_radius_px), min(float(image.shape[1] - 1), center_x + search_radius_px)),
         (max(0.0, center_y - search_radius_px), min(float(image.shape[0] - 1), center_y + search_radius_px)),
+        (min_scale, max_scale),
     ]
 
     def objective(params: npt.NDArray[np.float64]) -> float:
@@ -803,12 +812,12 @@ def _refine_support_center_by_profile_alignment(
             (float(params[0]), float(params[1])),
             angle_deg,
             support_diameter_px,
-            feedback_scale_factor,
+            float(params[2]),
         )
 
     result = scipy.optimize.minimize(
         objective,
-        x0=np.array([center_x, center_y], dtype=float),
+        x0=np.array([center_x, center_y, feedback_scale_factor], dtype=float),
         method="L-BFGS-B",
         bounds=bounds,
     )
@@ -816,10 +825,11 @@ def _refine_support_center_by_profile_alignment(
         raise RuntimeError(
             "Feedback profile alignment failed: "
             f"message={result.message}, cost={float(result.fun):.3e}, "
-            f"support_center_xy_px={support_center_xy_px}."
+            f"support_center_xy_px={support_center_xy_px}, "
+            f"feedback_scale_factor={feedback_scale_factor}."
         )
 
-    return (float(result.x[0]), float(result.x[1])), float(result.fun)
+    return (float(result.x[0]), float(result.x[1])), float(result.x[2]), float(result.fun)
 
 
 def _feedback_profile_alignment_cost(
@@ -837,9 +847,8 @@ def _feedback_profile_alignment_cost(
         angle_deg,
         feedback_scale_factor,
     )
-    support_mask = _support_mask_from_camera_coordinates(coords_y, coords_x, support_center_xy_px, support_diameter_px)
     target_mask = _target_alignment_mask(cfg, target)
-    active_mask = support_mask * target_mask
+    active_mask = target_mask
     if not np.any(active_mask > 0):
         return 1e12
     if not _active_region_is_inside_camera(image.shape, coords_y, coords_x, active_mask):

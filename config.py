@@ -101,6 +101,7 @@ class Config:
     feedback_angle_search_radius_deg: float = 8.0
     feedback_center_search_radius_px: float = 30.0
     feedback_center_coarse_step_px: float = 2.0
+    feedback_scale_search_fraction: float = 0.5
     feedback_edge_threshold_fraction: float = 0.05
     feedback_background_percentile: float = 5.0
     feedback_camera_image_is_intensity: bool = True
