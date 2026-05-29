@@ -131,13 +131,27 @@ optimizer.optimize(
 result = optimizer.get_result_summary()
 ```
 
-The current dual-wavelength loss is:
+The dual-wavelength optimizer supports several loss methods:
 
 ```python
-loss = loss_scale * (2 - overlap_1 - overlap_2) ** 2
+optimizer.optimize(
+    maxiter=optimizer_maxiter,
+    loss_scale=loss_scale,
+    optimize_phase=optimize_phase,
+    method=loss_method,
+    channel_weight=channel_weight,
+    exponential_rate=exponential_rate,
+)
 ```
 
-This is intentionally simple and can be replaced later if one wavelength needs different weighting.
+Available methods:
+
+- `linear`: `loss_scale * (2 - overlap_1 - overlap_2) ** 2`
+- `quadratic`: `loss_scale * (((1 - overlap_1) ** 2 + (1 - overlap_2) ** 2) / 2)`
+- `weighted_quadratic`: `loss_scale * (channel_weight * (1 - overlap_1) ** 2 + (1 - channel_weight) * (1 - overlap_2) ** 2)`
+- `exponential`: `loss_scale * (2 ** (exponential_rate * (1 - overlap_1)) + 2 ** (exponential_rate * (1 - overlap_2)))`
+
+`channel_weight` is used only by `weighted_quadratic`. `exponential_rate` is used only by `exponential`.
 
 ## slmsuite Input Beam
 

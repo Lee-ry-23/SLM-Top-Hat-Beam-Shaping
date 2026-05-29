@@ -13,7 +13,7 @@ from array_helpers import center_crop_or_pad_array, expand_superpixel, normalize
 from loss_functions import compute_benchmarks
 from optical_planes import CameraPlane
 from propagator import Propagator
-from validation_helpers import validate_array, validate_instance, validate_positive_float, validate_positive_int
+from validation_helpers import validate_array, validate_choice, validate_instance, validate_positive_float, validate_positive_int
 
 
 @dataclass
@@ -88,9 +88,15 @@ class DWCGOptimizer:
         maxiter: int,
         loss_scale: float,
         optimize_phase: bool,
+        method: str,
+        channel_weight: float,
+        exponential_rate: float,
     ) -> None:
         iterations = validate_positive_int(maxiter, "maxiter")
         scale = validate_positive_float(loss_scale, "loss_scale")
+        loss_method = validate_choice(method, ("linear", "quadratic", "weighted_quadratic", "exponential"), "method")
+        weight = _validate_unit_interval(channel_weight, "channel_weight")
+        rate = validate_positive_float(exponential_rate, "exponential_rate")
         if self.initial_hologram is None:
             raise RuntimeError("Initial hologram is not set. Call set_initial_hologram_array() first.")
 
@@ -99,6 +105,9 @@ class DWCGOptimizer:
         self._last_loss = None
         self._loss_scale = scale
         self._optimize_phase = bool(optimize_phase)
+        self._loss_method = loss_method
+        self._channel_weight = weight
+        self._exponential_rate = rate
         self._torch_cache_1 = self._build_torch_cache(
             self.propagator_1,
             self._target_amplitude_1,
@@ -145,6 +154,9 @@ class DWCGOptimizer:
         if not hasattr(self, "_torch_cache_1") or not hasattr(self, "_torch_cache_2"):
             self._loss_scale = 1.0
             self._optimize_phase = False
+            self._loss_method = "linear"
+            self._channel_weight = 0.5
+            self._exponential_rate = 1.0
             self._torch_cache_1 = self._build_torch_cache(
                 self.propagator_1,
                 self._target_amplitude_1,
@@ -165,7 +177,15 @@ class DWCGOptimizer:
         hologram = hologram_flat.view(self.propagator_1.slm_plane.shape)
         overlap_1 = _channel_overlap_torch(hologram, self._torch_cache_1, self._optimize_phase)
         overlap_2 = _channel_overlap_torch(hologram, self._torch_cache_2, self._optimize_phase)
-        loss = self._loss_scale * (2.0 - overlap_1 - overlap_2) ** 2
+        loss = _dual_wavelength_loss(
+            overlap_1,
+            overlap_2,
+            self._loss_scale,
+            self._loss_method,
+            self._channel_weight,
+            self._exponential_rate,
+        )
+
         loss.backward()
         if hologram_flat.grad is None:
             raise RuntimeError("Torch did not produce a hologram gradient for the DWCG objective.")
@@ -249,6 +269,35 @@ class DWCGOptimizer:
             "target_mask": torch.tensor(target_mask, dtype=dtype, device=device),
         }
 
+
+
+def _dual_wavelength_loss(
+    overlap_1: torch.Tensor,
+    overlap_2: torch.Tensor,
+    loss_scale: float,
+    method: str,
+    channel_weight: float,
+    exponential_rate: float,
+) -> torch.Tensor:
+    if method == "linear":
+        unscaled_loss = (2.0 - overlap_1 - overlap_2) ** 2
+    elif method == "quadratic":
+        unscaled_loss = ((1.0 - overlap_1) ** 2 + (1.0 - overlap_2) ** 2) / 2.0
+    elif method == "weighted_quadratic":
+        unscaled_loss = channel_weight * (1.0 - overlap_1) ** 2 + (1.0 - channel_weight) * (1.0 - overlap_2) ** 2
+    elif method == "exponential":
+        base = torch.as_tensor(2.0, dtype=overlap_1.dtype, device=overlap_1.device)
+        unscaled_loss = torch.pow(base, exponential_rate * (1.0 - overlap_1)) + torch.pow(base, exponential_rate * (1.0 - overlap_2))
+    else:
+        raise ValueError(f"Unsupported dual-wavelength loss method {method}.")
+    return float(loss_scale) * unscaled_loss
+
+
+def _validate_unit_interval(value: float, name: str) -> float:
+    result = float(value)
+    if not np.isfinite(result) or result < 0.0 or result > 1.0:
+        raise ValueError(f"{name} must be a finite float in [0, 1], got {value}.")
+    return result
 
 def _validate_shared_hologram_grid(propagator_1: Propagator, propagator_2: Propagator) -> None:
     if propagator_1.slm_plane.shape != propagator_2.slm_plane.shape:
