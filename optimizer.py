@@ -10,7 +10,7 @@ import scipy.optimize
 import torch
 
 from array_helpers import center_crop_or_pad_array, expand_superpixel, normalize_power, validate_real_array
-from initial_holograms import lens_phase_hologram, random_hologram, zero_hologram
+from initial_holograms import centered_pixel, lens_phase_hologram, random_hologram, zero_hologram
 from loss_functions import build_support_mask, compute_benchmarks
 from optical_planes import CameraPlane
 from propagator import Propagator
@@ -106,7 +106,7 @@ class CGOptimizer:
         elif selected_method == "zero":
             hologram = zero_hologram(shape)
         elif selected_method == "lens":
-            hologram = lens_phase_hologram(shape, self.propagator.slm_plane.scale_um, 0.0, 0.0, 0.0, 0.0)
+            hologram = lens_phase_hologram(shape, self.propagator.slm_plane.scale_um, 0.0, 0.0, 0.0, 0.0, centered_pixel(shape))
         else:
             raise ValueError(f"Unsupported initial hologram method {method}.")
         self.set_initial_hologram_array(hologram)
@@ -185,14 +185,17 @@ class CGOptimizer:
         padded_field[y0:y0 + slm_shape[0], x0:x0 + slm_shape[1]] = cache["a0"] * slm_field
         output_field = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(padded_field)))
         output_amplitude = torch.abs(output_field)
-        output_phase = torch.angle(output_field)
 
         if self._optimize_phase:
-            overlap = torch.sum(cache["target_amplitude"] * output_amplitude * cache["target_mask"] * torch.cos(output_phase - cache["target_phase"]))
+            target_field = cache["target_amplitude"] * cache["target_mask"] * torch.exp(1j * cache["target_phase"])
+            output_weighted_field = output_field * cache["target_mask"]
+            numerator = torch.abs(torch.sum(torch.conj(target_field) * output_weighted_field)) ** 2
+            denominator = torch.sum(torch.abs(target_field) ** 2) * torch.sum(torch.abs(output_weighted_field) ** 2)
+            overlap = numerator / torch.clamp(denominator, min=torch.finfo(dtype).eps)
         else:
-            overlap = torch.sum(cache["target_amplitude"] * output_amplitude * cache["target_mask"])
-        denominator = torch.sqrt(torch.sum(cache["target_amplitude"] ** 2) * torch.sum((output_amplitude * cache["target_mask"]) ** 2))
-        overlap = overlap / torch.clamp(denominator, min=torch.finfo(dtype).eps)
+            numerator = torch.sum(cache["target_amplitude"] * output_amplitude * cache["target_mask"]) ** 2
+            denominator = torch.sum((cache["target_amplitude"] * cache["target_mask"]) ** 2) * torch.sum((output_amplitude * cache["target_mask"]) ** 2)
+            overlap = numerator / torch.clamp(denominator, min=torch.finfo(dtype).eps)
         loss = self._loss_scale * (1.0 - overlap) ** 2
         loss.backward()
         if hologram_flat.grad is None:

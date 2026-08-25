@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
+import scipy.optimize
 
 from validation_helpers import (
     UnitType,
@@ -17,6 +20,16 @@ from validation_helpers import (
     validate_shape,
     validate_unit_type,
 )
+
+
+@dataclass(frozen=True)
+class BeamCenterFit:
+    center_pixel: tuple[float, float]
+    center_um: tuple[float, float]
+    sigma_pixel: tuple[float, float]
+    sigma_um: tuple[float, float]
+    background: float
+    peak_amplitude: float
 
 
 class OpticalPlane:
@@ -182,6 +195,14 @@ class SLMPlane(OpticalPlane):
             "magma",
         )
 
+    def fit_amplitude_center(self, threshold_fraction: float, maxfev: int) -> BeamCenterFit:
+        return _fit_gaussian_amplitude_center(
+            self.amplitude,
+            self.scale_um,
+            _validate_open_unit_interval(threshold_fraction, "threshold_fraction"),
+            validate_positive_int(maxfev, "maxfev"),
+        )
+
 
 class CameraPlane(OpticalPlane):
     def __init__(
@@ -204,6 +225,96 @@ class CameraPlane(OpticalPlane):
 
     def set_measured_amplitude(self, amplitude: npt.ArrayLike) -> None:
         self.set_amplitude(amplitude)
+
+
+def _fit_gaussian_amplitude_center(
+    amplitude: npt.NDArray[np.float64],
+    scale_um: tuple[float, float],
+    threshold_fraction: float,
+    maxfev: int,
+) -> BeamCenterFit:
+    min_amplitude = float(np.min(amplitude))
+    max_amplitude = float(np.max(amplitude))
+    dynamic_range = max_amplitude - min_amplitude
+    if dynamic_range <= 0.0:
+        raise ValueError("SLM amplitude has no positive dynamic range for center fitting.")
+
+    normalized = (amplitude - min_amplitude) / dynamic_range
+    support = normalized >= threshold_fraction
+    if not np.any(support):
+        raise ValueError(f"No amplitude pixels exceed threshold_fraction={threshold_fraction}.")
+
+    support_y, support_x = np.where(support)
+    y0, y1 = _expanded_bounds(int(support_y.min()), int(support_y.max()), amplitude.shape[0])
+    x0, x1 = _expanded_bounds(int(support_x.min()), int(support_x.max()), amplitude.shape[1])
+
+    roi = amplitude[y0:y1, x0:x1]
+    y = np.arange(y0, y1, dtype=float)
+    x = np.arange(x0, x1, dtype=float)
+    x_grid, y_grid = np.meshgrid(x, y, indexing="xy")
+
+    initial_background = float(np.percentile(roi, 5.0))
+    signal = np.clip(roi - initial_background, 0.0, None)
+    signal_sum = float(np.sum(signal))
+    if signal_sum <= 0.0:
+        raise ValueError("Amplitude ROI has no positive signal above background for center fitting.")
+
+    initial_center_y = float(np.sum(y_grid * signal) / signal_sum)
+    initial_center_x = float(np.sum(x_grid * signal) / signal_sum)
+    initial_sigma_y = max(float(np.sqrt(np.sum((y_grid - initial_center_y) ** 2 * signal) / signal_sum)), 0.5)
+    initial_sigma_x = max(float(np.sqrt(np.sum((x_grid - initial_center_x) ** 2 * signal) / signal_sum)), 0.5)
+    initial_peak = max(max_amplitude - initial_background, np.finfo(float).eps)
+
+    lower_bounds = [min_amplitude - dynamic_range, 0.0, float(y0), float(x0), 0.5, 0.5]
+    upper_bounds = [max_amplitude, 2.0 * dynamic_range, float(y1 - 1), float(x1 - 1), float(amplitude.shape[0]), float(amplitude.shape[1])]
+    p0 = [initial_background, initial_peak, initial_center_y, initial_center_x, initial_sigma_y, initial_sigma_x]
+
+    fitted, _ = scipy.optimize.curve_fit(
+        _elliptical_gaussian_amplitude,
+        (y_grid.reshape(-1), x_grid.reshape(-1)),
+        roi.reshape(-1),
+        p0=p0,
+        bounds=(lower_bounds, upper_bounds),
+        maxfev=maxfev,
+    )
+
+    background, peak_amplitude, center_y, center_x, sigma_y, sigma_x = (float(value) for value in fitted)
+    dy_um, dx_um = scale_um
+    return BeamCenterFit(
+        center_pixel=(center_y, center_x),
+        center_um=(center_y * dy_um, center_x * dx_um),
+        sigma_pixel=(sigma_y, sigma_x),
+        sigma_um=(sigma_y * dy_um, sigma_x * dx_um),
+        background=background,
+        peak_amplitude=peak_amplitude,
+    )
+
+
+def _elliptical_gaussian_amplitude(
+    coordinates: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]],
+    background: float,
+    peak_amplitude: float,
+    center_y: float,
+    center_x: float,
+    sigma_y: float,
+    sigma_x: float,
+) -> npt.NDArray[np.float64]:
+    y, x = coordinates
+    exponent = -0.5 * (((y - center_y) / sigma_y) ** 2 + ((x - center_x) / sigma_x) ** 2)
+    return background + peak_amplitude * np.exp(exponent)
+
+
+def _expanded_bounds(start: int, stop: int, size: int) -> tuple[int, int]:
+    width = stop - start + 1
+    padding = max(3, int(np.ceil(0.5 * width)))
+    return max(0, start - padding), min(size, stop + padding + 1)
+
+
+def _validate_open_unit_interval(value: float, name: str) -> float:
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0 or result >= 1.0:
+        raise ValueError(f"{name} must be a finite float in (0, 1), got {value}.")
+    return result
 
 
 def _plot_plane_image(

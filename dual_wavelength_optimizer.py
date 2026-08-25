@@ -349,12 +349,14 @@ def _channel_overlap_torch(
     padded_field[y0:y0 + slm_shape[0], x0:x0 + slm_shape[1]] = cache["a0"] * slm_field
     output_field = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(padded_field)))
     output_amplitude = torch.abs(output_field)
-    output_phase = torch.angle(output_field)
     if optimize_phase:
-        numerator = torch.sum(target_amplitude * output_amplitude * target_mask * torch.cos(output_phase - target_phase))
+        target_field = target_amplitude * target_mask * torch.exp(1j * target_phase)
+        output_weighted_field = output_field * target_mask
+        numerator = torch.abs(torch.sum(torch.conj(target_field) * output_weighted_field)) ** 2
+        denominator = torch.sum(torch.abs(target_field) ** 2) * torch.sum(torch.abs(output_weighted_field) ** 2)
     else:
-        numerator = torch.sum(target_amplitude * output_amplitude * target_mask)
-    denominator = torch.sqrt(torch.sum(target_amplitude**2) * torch.sum((output_amplitude * target_mask) ** 2))
+        numerator = torch.sum(target_amplitude * output_amplitude * target_mask) ** 2
+        denominator = torch.sum((target_amplitude * target_mask) ** 2) * torch.sum((output_amplitude * target_mask) ** 2)
     return numerator / torch.clamp(denominator, min=torch.finfo(dtype).eps)
 
 
@@ -386,10 +388,10 @@ def _overlap_numpy(
     target_phase: npt.NDArray[np.float64],
     target_mask: npt.NDArray[np.float64],
 ) -> float:
-    output_amplitude = np.abs(output_field)
-    output_phase = np.angle(output_field)
-    numerator = float(np.sum(target_amplitude * output_amplitude * target_mask * np.cos(output_phase - target_phase)))
-    denominator = float(np.sqrt(np.sum(target_amplitude**2) * np.sum((output_amplitude * target_mask) ** 2)))
+    target_field = target_amplitude * target_mask * np.exp(1j * target_phase)
+    output_weighted_field = output_field * target_mask
+    numerator = float(np.abs(np.sum(np.conj(target_field) * output_weighted_field)) ** 2)
+    denominator = float(np.sum(np.abs(target_field) ** 2) * np.sum(np.abs(output_weighted_field) ** 2))
     if denominator <= 0:
         raise ValueError("Cannot compute channel overlap because the denominator is zero.")
     return numerator / denominator

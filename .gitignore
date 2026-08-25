@@ -24,3 +24,6 @@ Beam_Waists (2).ipynb
 slmsuite_cg_example.ipynb
 hologram_varify.ipynb
 get_hologram_theo+MRAF.ipynb
+split_slm_two_beam_outputs/
+tophat_scan_outputs/
+*.jl
