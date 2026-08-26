@@ -21,8 +21,8 @@ def build_rectangle_target(
     width_y = validate_positive_float(width_y_um, "width_y_um")
     x_center = 0.5 * (float(x_axis[0]) + float(x_axis[-1]))
     y_center = 0.5 * (float(y_axis[0]) + float(y_axis[-1]))
-    x_profile = (np.abs(x_axis - x_center) <= width_x / 2.0).astype(float)
-    y_profile = (np.abs(y_axis - y_center) <= width_y / 2.0).astype(float)
+    x_profile = _pixel_overlap_tophat_profile(x_axis, width_x, x_center, "x_axis_um")
+    y_profile = _pixel_overlap_tophat_profile(y_axis, width_y, y_center, "y_axis_um")
     return np.outer(y_profile, x_profile)
 
 
@@ -68,3 +68,28 @@ def apply_psf_smoothing(
     if peak <= 0:
         raise ValueError("PSF smoothing produced an empty target.")
     return smoothed / peak
+
+
+def _pixel_overlap_tophat_profile(
+    axis_um: npt.NDArray[np.float64],
+    width_um: float,
+    center_um: float,
+    axis_name: str,
+) -> npt.NDArray[np.float64]:
+    if axis_um.size < 2:
+        raise ValueError(f"{axis_name} must contain at least two points to build a subpixel target.")
+    spacing_um = float(np.median(np.diff(axis_um)))
+    if spacing_um <= 0.0:
+        raise ValueError(f"{axis_name} must be strictly increasing.")
+    half_spacing_um = 0.5 * spacing_um
+    target_min_um = float(center_um) - 0.5 * float(width_um)
+    target_max_um = float(center_um) + 0.5 * float(width_um)
+    pixel_min_um = axis_um - half_spacing_um
+    pixel_max_um = axis_um + half_spacing_um
+    overlap_um = np.maximum(0.0, np.minimum(pixel_max_um, target_max_um) - np.maximum(pixel_min_um, target_min_um))
+    profile = overlap_um / spacing_um
+    if float(np.max(profile)) <= 0.0:
+        nearest_index = int(np.argmin(np.abs(axis_um - float(center_um))))
+        profile[nearest_index] = min(1.0, float(width_um) / spacing_um)
+    return profile
+
