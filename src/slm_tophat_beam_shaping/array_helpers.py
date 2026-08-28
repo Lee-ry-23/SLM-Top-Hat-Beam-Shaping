@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
-from validation_helpers import validate_amplitude, validate_array, validate_positive_float, validate_positive_int, validate_shape
+from .validation_helpers import validate_amplitude, validate_array, validate_positive_float, validate_positive_int, validate_shape
 
 
 def ensure_2d_float_array(data: npt.ArrayLike, name: str) -> npt.NDArray[np.float64]:

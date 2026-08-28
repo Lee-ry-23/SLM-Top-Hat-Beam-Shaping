@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
-from validation_helpers import (
+from .validation_helpers import (
     validate_array,
     validate_axis,
     validate_complex_2d_array,

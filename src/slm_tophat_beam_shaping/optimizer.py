@@ -9,13 +9,13 @@ import numpy.typing as npt
 import scipy.optimize
 import torch
 
-from array_helpers import center_crop_or_pad_array, expand_superpixel, normalize_power, validate_real_array
-from initial_holograms import centered_pixel, lens_phase_hologram, random_hologram, zero_hologram
-from loss_functions import build_support_mask, compute_benchmarks
-from optical_planes import CameraPlane
-from propagator import Propagator
-from target_profiles import apply_psf_smoothing, build_line_target, build_rectangle_target
-from validation_helpers import validate_array, validate_choice, validate_instance, validate_positive_float, validate_positive_int
+from .array_helpers import center_crop_or_pad_array, expand_superpixel, normalize_power, validate_real_array
+from .initial_holograms import centered_pixel, lens_phase_hologram, random_hologram, zero_hologram
+from .loss_functions import build_support_mask, compute_benchmarks
+from .optical_planes import CameraPlane
+from .propagator import Propagator
+from .target_profiles import apply_psf_smoothing, build_line_target, build_rectangle_target
+from .validation_helpers import validate_array, validate_choice, validate_instance, validate_positive_float, validate_positive_int
 
 
 @dataclass

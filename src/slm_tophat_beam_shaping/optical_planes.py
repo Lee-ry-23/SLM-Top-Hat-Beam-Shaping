@@ -7,7 +7,7 @@ import numpy as np
 import numpy.typing as npt
 import scipy.optimize
 
-from validation_helpers import (
+from .validation_helpers import (
     UnitType,
     validate_amplitude,
     validate_field,

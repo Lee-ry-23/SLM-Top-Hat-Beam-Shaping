@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
-from validation_helpers import validate_positive_scale_um, validate_shape
+from .validation_helpers import validate_positive_scale_um, validate_shape
 
 
 def random_hologram(shape: tuple[int, int], seed: int | None) -> npt.NDArray[np.float64]:

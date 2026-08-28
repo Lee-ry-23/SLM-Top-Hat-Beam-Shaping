@@ -4,10 +4,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 
-from optical_planes import CameraPlane, OpticalPlane, SLMPlane
-from propagation_functions import center_crop_or_pad_field, focal_plane_pixel_size_um, pad_field_to_shape, shifted_fourier_transform
-from array_helpers import center_crop_or_pad_array
-from validation_helpers import validate_choice, validate_instance, validate_positive_float, validate_positive_int, validate_real_2d_array
+from .optical_planes import CameraPlane, OpticalPlane, SLMPlane
+from .propagation_functions import center_crop_or_pad_field, focal_plane_pixel_size_um, pad_field_to_shape, shifted_fourier_transform
+from .array_helpers import center_crop_or_pad_array
+from .validation_helpers import validate_choice, validate_instance, validate_positive_float, validate_positive_int, validate_real_2d_array
 
 
 class Propagator:

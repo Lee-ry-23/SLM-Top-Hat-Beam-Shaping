@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
-from validation_helpers import validate_complex_2d_array, validate_positive_float, validate_positive_scale_um, validate_shape
+from .validation_helpers import validate_complex_2d_array, validate_positive_float, validate_positive_scale_um, validate_shape
 
 
 def shifted_fourier_transform(field: npt.ArrayLike) -> npt.NDArray[np.complex128]:

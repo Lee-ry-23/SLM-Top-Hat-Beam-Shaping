@@ -9,11 +9,11 @@ import numpy.typing as npt
 import scipy.optimize
 import torch
 
-from array_helpers import center_crop_or_pad_array, expand_superpixel, normalize_power, validate_real_array
-from loss_functions import compute_benchmarks
-from optical_planes import CameraPlane
-from propagator import Propagator
-from validation_helpers import validate_array, validate_choice, validate_instance, validate_positive_float, validate_positive_int
+from .array_helpers import center_crop_or_pad_array, expand_superpixel, normalize_power, validate_real_array
+from .loss_functions import compute_benchmarks
+from .optical_planes import CameraPlane
+from .propagator import Propagator
+from .validation_helpers import validate_array, validate_choice, validate_instance, validate_positive_float, validate_positive_int
 
 
 @dataclass

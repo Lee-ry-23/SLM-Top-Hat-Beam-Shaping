@@ -4,7 +4,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.ndimage import gaussian_filter
 
-from validation_helpers import validate_axis, validate_positive_float, validate_positive_scale_um, validate_shape
+from .validation_helpers import validate_axis, validate_positive_float, validate_positive_scale_um, validate_shape
 
 
 def build_rectangle_target(
